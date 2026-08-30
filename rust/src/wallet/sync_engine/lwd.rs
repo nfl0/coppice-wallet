@@ -303,7 +303,7 @@ pub(crate) async fn get_latest_block(
 /// optional hash in a `GetLatestBlock` response. A server that also omits
 /// [`CompactBlock::hash`] cannot safely prove tip continuity, so this helper
 /// returns an incompatibility error.
-pub(super) async fn get_compact_block_hash(
+pub(crate) async fn get_compact_block_hash(
     client: &mut CompactTxStreamerClient<Channel>,
     height: u64,
 ) -> Result<BlockHash, SyncError> {
@@ -344,7 +344,7 @@ fn validate_compact_block_hash(
 
 /// Return the note commitment tree state for a block with a bounded
 /// response wait.
-pub(super) async fn get_tree_state(
+pub(crate) async fn get_tree_state(
     client: &mut CompactTxStreamerClient<Channel>,
     height: u64,
 ) -> Result<TreeState, SyncError> {
@@ -711,7 +711,7 @@ pub(crate) async fn start_mempool_stream(
 /// batch lives in RAM for exactly one scan call and is dropped
 /// immediately after. Incomplete, oversized, or out-of-order responses are
 /// rejected before the scanner can mistake them for progress.
-pub(super) async fn download_blocks(
+pub(crate) async fn download_blocks(
     client: &mut CompactTxStreamerClient<Channel>,
     start: BlockHeight,
     end: BlockHeight,
@@ -746,6 +746,21 @@ pub(super) async fn download_blocks(
     .await?;
 
     Ok(MemoryBlockSource::new(blocks))
+}
+
+/// Downloads a compact range for an application host without exposing the
+/// sync engine's one-shot `BlockSource` implementation across wallet
+/// modules. The range remains validated by the same collector used by the
+/// ordinary wallet scanner.
+pub(crate) async fn download_blocks_vec(
+    client: &mut CompactTxStreamerClient<Channel>,
+    start: BlockHeight,
+    end: BlockHeight,
+    network: WalletNetwork,
+) -> Result<Vec<CompactBlock>, SyncError> {
+    Ok(download_blocks(client, start, end, network)
+        .await?
+        .into_blocks())
 }
 
 async fn collect_compact_blocks<S>(

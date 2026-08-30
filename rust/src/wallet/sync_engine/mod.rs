@@ -53,10 +53,8 @@ pub(crate) mod mempool;
 use enhance::run_enhancement;
 pub(crate) use error::SyncError;
 use error::{RecoveryStrategy, MAX_REWINDS_PER_RUN};
-use lwd::{
-    download_blocks, download_subtree_roots, get_address_utxos_stream, get_compact_block_hash,
-    get_tree_state,
-};
+use lwd::{download_blocks, download_subtree_roots, get_address_utxos_stream};
+pub(crate) use lwd::{download_blocks_vec, get_compact_block_hash, get_tree_state};
 pub(crate) use lwd::{
     get_latest_block, get_taddress_txids, get_transaction, next_stream_message,
     open_background_direct_lwd_channel, open_isolated_lwd_channel, open_lwd_channel,
@@ -2306,6 +2304,19 @@ async fn run_sync_impl(
     // Open DB once — reused for the entire sync
     let mut db =
         with_wallet_db_write_lock("sync_engine.open_db", || open_db(db_data_path, network))?;
+    // Coppice Names is an optional derived host. A malformed or stale
+    // application sidecar must never poison the ordinary wallet scanner;
+    // it is reported and rebuilt explicitly through the Names API.
+    let mut names_host = match crate::wallet::coppice::load_for_sync(db_data_path, network) {
+        Ok(host) => host,
+        Err(error) => {
+            log::warn!(
+                "[{}] sync: ignoring invalid Coppice Names sidecar: {error}",
+                elapsed()
+            );
+            None
+        }
+    };
     // The main-phase rewind budget also covers a reorg detected by the
     // initial tip response, before the scan queue has been created.
     let mut main_rewinds_this_run: u32 = 0;
@@ -2365,6 +2376,11 @@ async fn run_sync_impl(
             main_rewinds_this_run += 1;
             let (actual_height, _, pending_blocks) =
                 rewind_for_confirmed_tip_reorg(&mut db, tip.height)?;
+            crate::wallet::coppice::invalidate_after_reorg(
+                db_data_path,
+                &mut names_host,
+                u32::from(actual_height),
+            );
             log::warn!(
                 "[{}] sync: initial tip proved a reorg; rewound to {} and \
                  queued {} block(s) toward tip {}",
@@ -2744,6 +2760,11 @@ async fn run_sync_impl(
                             prefetch = None;
                             let (actual_height, repair_ranges, pending_blocks) =
                                 rewind_for_confirmed_tip_reorg(&mut db, fresh_tip.height)?;
+                            crate::wallet::coppice::invalidate_after_reorg(
+                                db_data_path,
+                                &mut names_host,
+                                u32::from(actual_height),
+                            );
                             log::warn!(
                                 "[{}] sync: periodic tip proved a reorg; rewound to {} \
                                  and queued {} block(s) toward tip {}",
@@ -2859,6 +2880,11 @@ async fn run_sync_impl(
                             prefetch = None;
                             let (actual_height, repair_ranges, repair_pending_blocks) =
                                 rewind_for_confirmed_tip_reorg(&mut db, fresh_tip.height)?;
+                            crate::wallet::coppice::invalidate_after_reorg(
+                                db_data_path,
+                                &mut names_host,
+                                u32::from(actual_height),
+                            );
                             log::warn!(
                                 "[{}] sync: final tip proved a reorg; rewound to {} \
                                  and queued {} block(s) toward tip {}",
@@ -3263,6 +3289,11 @@ async fn run_sync_impl(
                             }
                         },
                     )?;
+                    crate::wallet::coppice::invalidate_after_reorg(
+                        db_data_path,
+                        &mut names_host,
+                        u32::from(actual_rewind_height),
+                    );
                     let current_tip = block_height_from_u64(
                         current_tip_height,
                         "current lightwalletd chain tip",
@@ -3323,6 +3354,45 @@ async fn run_sync_impl(
                 }
             },
         };
+
+        // Feed the exact scanner-accepted compact bytes into the optional
+        // Coppice host. This is deliberately post-scan: application replay
+        // cannot advance on a batch that the wallet DB rejected or rewound.
+        let mut names_host_failed = false;
+        if let Some(host) = names_host.as_mut() {
+            let names_blocks = block_source.into_blocks();
+            let first_height = names_blocks
+                .first()
+                .and_then(|block| u32::try_from(block.height).ok());
+            if let Some(first_height) = first_height {
+                if host.can_apply_start(first_height) {
+                    if let Err(error) = host.apply_compact_blocks(&mut client, names_blocks).await {
+                        log::warn!(
+                            "[{}] sync: disabling Coppice Names host after batch failure: {error}",
+                            elapsed()
+                        );
+                        names_host_failed = true;
+                    } else if let Err(error) =
+                        crate::wallet::coppice::persist_for_sync(db_data_path, host)
+                    {
+                        log::warn!(
+                            "[{}] sync: disabling Coppice Names host after checkpoint failure: {error}",
+                            elapsed()
+                        );
+                        names_host_failed = true;
+                    }
+                } else {
+                    log::debug!(
+                        "[{}] sync: Coppice Names host is not contiguous with wallet batch at {}; leaving it unchanged",
+                        elapsed(),
+                        first_height
+                    );
+                }
+            }
+        }
+        if names_host_failed {
+            crate::wallet::coppice::disable_after_error(db_data_path, &mut names_host);
+        }
 
         if migration_anchor_retention_required {
             let retained = with_wallet_db_write_lock(

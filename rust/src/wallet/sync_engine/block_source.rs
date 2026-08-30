@@ -40,6 +40,15 @@ impl MemoryBlockSource {
         Self { blocks }
     }
 
+    /// Consumes this one-shot scan source and returns the validated compact
+    /// blocks it contains.  The sync loop uses this only after
+    /// `scan_cached_blocks` has accepted the batch, so application hosts can
+    /// observe exactly the same canonical bytes without issuing a second
+    /// block-range request.
+    pub(crate) fn into_blocks(self) -> Vec<CompactBlock> {
+        self.blocks
+    }
+
     /// Returns whether this source contains exactly the requested half-open
     /// range in ascending, contiguous order.
     pub(super) fn contains_exact_range(&self, start: u32, end: u32) -> bool {

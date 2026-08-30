@@ -924,6 +924,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "coppice"
+version = "0.1.0"
+source = "git+https://github.com/nfl0/coppice.git?rev=059a8dd28caf18bb6ff769bf43681ab7cbe493a4#059a8dd28caf18bb6ff769bf43681ab7cbe493a4"
+dependencies = [
+ "coppice-core",
+ "zcash_protocol",
+]
+
+[[package]]
+name = "coppice-core"
+version = "0.1.0"
+source = "git+https://github.com/nfl0/coppice.git?rev=059a8dd28caf18bb6ff769bf43681ab7cbe493a4#059a8dd28caf18bb6ff769bf43681ab7cbe493a4"
+dependencies = [
+ "blake2b_simd",
+ "incrementalmerkletree",
+ "serde",
+ "serde_json",
+ "zakura-orchard",
+ "zakura-primitives",
+ "zcash_note_encryption",
+ "zcash_protocol",
+]
+
+[[package]]
+name = "coppice-librustzcash"
+version = "0.1.0"
+source = "git+https://github.com/nfl0/coppice.git?rev=059a8dd28caf18bb6ff769bf43681ab7cbe493a4#059a8dd28caf18bb6ff769bf43681ab7cbe493a4"
+dependencies = [
+ "coppice-core",
+ "zakura-client-backend",
+ "zakura-orchard",
+ "zcash_protocol",
+]
+
+[[package]]
+name = "coppice-names"
+version = "0.1.0"
+source = "git+https://github.com/nfl0/coppice-names.git?rev=1a34e0ab25dde9fc2cad002edff3bdbaa2ee13f6#1a34e0ab25dde9fc2cad002edff3bdbaa2ee13f6"
+dependencies = [
+ "blake2b_simd",
+ "coppice",
+ "hex",
+ "postcard",
+ "rand_core 0.10.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "zakura-halo2-gadgets",
+ "zakura-halo2-proofs",
+ "zakura-orchard",
+ "zakura-pasta-curves",
+ "zcash_address",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4349,6 +4404,9 @@ dependencies = [
  "base64",
  "bip0039",
  "bytes",
+ "coppice",
+ "coppice-librustzcash",
+ "coppice-names",
  "ff 0.14.0",
  "flutter_rust_bridge",
  "futures",
@@ -7675,8 +7733,7 @@ dependencies = [
 [[package]]
 name = "zakura-orchard"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de5ef84c9e8dfa576e80f7be5aff3449741b57900d78fcbf4f536b42ce909fd6"
+source = "git+https://github.com/nfl0/orchard-coppice.git?rev=0e09398970130b9510ce5011129acafc5039e79f#0e09398970130b9510ce5011129acafc5039e79f"
 dependencies = [
  "aes",
  "bitvec",

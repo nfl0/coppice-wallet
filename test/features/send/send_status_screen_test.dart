@@ -22,7 +22,7 @@ import 'package:zcash_wallet/src/features/address_book/providers/address_book_pr
 import 'package:zcash_wallet/src/features/address_book/models/address_book_contact.dart';
 import 'package:zcash_wallet/src/features/send/screens/send_status_screen.dart';
 import 'package:zcash_wallet/src/features/send/services/send_flow.dart';
-import 'package:zcash_wallet/src/providers/account_models.dart';
+import 'package:zcash_wallet/src/providers/account_provider.dart';
 import 'package:zcash_wallet/src/providers/app_security_provider.dart';
 import 'package:zcash_wallet/src/providers/sync_provider.dart';
 import 'package:zcash_wallet/src/providers/zec_price_change_provider.dart';
@@ -622,13 +622,19 @@ Future<void> _setDesktopViewport(WidgetTester tester) async {
 /// zone on their own. Bounded pumps afterwards because the in-progress
 /// loader animation repeats forever (pumpAndSettle would hang).
 Future<void> _flushBroadcast(WidgetTester tester) async {
-  // Several rounds because the chain interleaves real-IO awaits with
-  // fake-zone microtasks that only run during pump.
-  for (var i = 0; i < 5; i++) {
+  // The chain interleaves real-IO awaits with fake-zone microtasks that only
+  // run during pump. Wait boundedly for an observable receipt state instead
+  // of assuming a fixed host-speed-dependent 100 ms is sufficient.
+  for (var i = 0; i < 50; i++) {
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
     );
     await tester.pump();
+    if (find.text('Sent successfully').evaluate().isNotEmpty ||
+        find.text('Send failed').evaluate().isNotEmpty ||
+        find.text('Tx ID').evaluate().isNotEmpty) {
+      return;
+    }
   }
 }
 
@@ -692,6 +698,7 @@ Widget _harness(
       addressBookRepositoryProvider.overrideWithValue(
         _FakeAddressBookRepository(),
       ),
+      accountProvider.overrideWith(_FakeAccountNotifier.new),
       appSecurityProvider.overrideWith(_FakeAppSecurityNotifier.new),
       syncProvider.overrideWith(_FakeSyncNotifier.new),
     ],
@@ -778,6 +785,12 @@ class _FakeAddressBookRepository implements AddressBookRepository {
 class _FakeAppSecurityNotifier extends AppSecurityNotifier {
   @override
   String requireSessionPasswordForNativeSecretUse() => 'test-password';
+}
+
+class _FakeAccountNotifier extends AccountNotifier {
+  @override
+  Future<Uint8List?> getMnemonicBytesForAccount(String uuid) async =>
+      Uint8List.fromList(List<int>.generate(32, (index) => index));
 }
 
 class _FakeSyncNotifier extends SyncNotifier {

@@ -4,6 +4,7 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/keystone.dart';
+import 'api/names.dart';
 import 'api/network_privacy.dart';
 import 'api/secret.dart';
 import 'api/simple.dart';
@@ -91,6 +92,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ApiMempoolTxEvent dco_decode_api_mempool_tx_event(dynamic raw);
+
+  @protected
+  ApiNamesResolution dco_decode_api_names_resolution(dynamic raw);
+
+  @protected
+  ApiNamesWalletStatus dco_decode_api_names_wallet_status(dynamic raw);
 
   @protected
   ApiPendingShareRound dco_decode_api_pending_share_round(dynamic raw);
@@ -925,6 +932,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ApiMempoolTxEvent sse_decode_api_mempool_tx_event(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ApiNamesResolution sse_decode_api_names_resolution(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ApiNamesWalletStatus sse_decode_api_names_wallet_status(
     SseDeserializer deserializer,
   );
 
@@ -1977,6 +1994,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_api_mempool_tx_event(
     ApiMempoolTxEvent self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_api_names_resolution(
+    ApiNamesResolution self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_api_names_wallet_status(
+    ApiNamesWalletStatus self,
     SseSerializer serializer,
   );
 
