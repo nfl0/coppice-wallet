@@ -93,7 +93,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ApiManagedName dco_decode_api_managed_name(dynamic raw);
+
+  @protected
   ApiMempoolTxEvent dco_decode_api_mempool_tx_event(dynamic raw);
+
+  @protected
+  ApiNamesBondStatus dco_decode_api_names_bond_status(dynamic raw);
+
+  @protected
+  ApiNamesCommitProposal dco_decode_api_names_commit_proposal(dynamic raw);
 
   @protected
   ApiNamesResolution dco_decode_api_names_resolution(dynamic raw);
@@ -337,6 +346,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ApiKeystoneSignatureInput> dco_decode_list_api_keystone_signature_input(
     dynamic raw,
   );
+
+  @protected
+  List<ApiManagedName> dco_decode_list_api_managed_name(dynamic raw);
 
   @protected
   List<ApiPendingShareRound> dco_decode_list_api_pending_share_round(
@@ -933,7 +945,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ApiManagedName sse_decode_api_managed_name(SseDeserializer deserializer);
+
+  @protected
   ApiMempoolTxEvent sse_decode_api_mempool_tx_event(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ApiNamesBondStatus sse_decode_api_names_bond_status(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ApiNamesCommitProposal sse_decode_api_names_commit_proposal(
     SseDeserializer deserializer,
   );
 
@@ -1251,6 +1276,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ApiKeystoneSignatureInput> sse_decode_list_api_keystone_signature_input(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ApiManagedName> sse_decode_list_api_managed_name(
     SseDeserializer deserializer,
   );
 
@@ -1994,8 +2024,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_api_managed_name(
+    ApiManagedName self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_api_mempool_tx_event(
     ApiMempoolTxEvent self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_api_names_bond_status(
+    ApiNamesBondStatus self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_api_names_commit_proposal(
+    ApiNamesCommitProposal self,
     SseSerializer serializer,
   );
 
@@ -2377,6 +2425,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_api_keystone_signature_input(
     List<ApiKeystoneSignatureInput> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_api_managed_name(
+    List<ApiManagedName> self,
     SseSerializer serializer,
   );
 

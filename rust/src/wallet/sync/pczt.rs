@@ -742,7 +742,18 @@ pub async fn create_tex_pczts_from_proposal(
 /// safe to call for a proposal that has already been consumed or
 /// never existed.
 pub fn discard_proposal(proposal_id: u64, send_flow_id: &str) -> Result<(), String> {
-    discard_stored_proposal(proposal_id, send_flow_id)
+    let wallet = stored_proposal_lock(proposal_id, send_flow_id)
+        .ok()
+        .map(|lock| (lock.db_path, lock.network));
+    discard_stored_proposal(proposal_id, send_flow_id)?;
+    if let Some((db_path, network)) = wallet {
+        crate::wallet::names_lifecycle::cancel_registration_proposal(
+            &db_path,
+            network,
+            send_flow_id,
+        )?;
+    }
+    Ok(())
 }
 
 /// Forget the in-memory proposal capability while leaving its wallet input

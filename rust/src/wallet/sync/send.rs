@@ -765,6 +765,29 @@ pub(crate) fn propose_send(
     amount_zatoshi: u64,
     memo_str: Option<&str>,
 ) -> Result<ProposalResult, String> {
+    propose_send_with_raw_memo(
+        db_path,
+        network,
+        account_uuid,
+        send_flow_id,
+        to_address,
+        amount_zatoshi,
+        memo_str.map(str::as_bytes),
+    )
+}
+
+/// Names carriers require arbitrary 512-byte CPV1 memo frames rather than a
+/// UTF-8 user memo. This shares the ordinary proposal, input-lock, fee and
+/// execution path so the application cannot bypass wallet policy.
+pub(crate) fn propose_send_with_raw_memo(
+    db_path: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+    send_flow_id: &str,
+    to_address: &str,
+    amount_zatoshi: u64,
+    memo_bytes: Option<&[u8]>,
+) -> Result<ProposalResult, String> {
     use zcash_protocol::{PoolType, ShieldedPool as SP};
 
     if send_flow_id.is_empty() {
@@ -776,7 +799,7 @@ pub(crate) fn propose_send(
         let account_id = parse_account_uuid(account_uuid)?;
         let proposed_tx_version =
             proposed_tx_version_for_wallet_db(&db, network, "creating a send")?;
-        let request = build_send_request(to_address, amount_zatoshi, memo_str)?;
+        let request = build_send_request_with_raw_memo(to_address, amount_zatoshi, memo_bytes)?;
         let migration_locks = super::migration::locked_migration_note_refs(db_path, account_uuid)?;
         let spend_policy = ordinary_send_spend_policy(
             super::migration::migration_reserves_orchard_inputs(db_path, account_uuid, network)?,
@@ -795,7 +818,8 @@ pub(crate) fn propose_send(
             pass1_proposal,
             proposed_tx_version,
             |tx_version| {
-                let request = build_send_request(to_address, amount_zatoshi, memo_str)?;
+                let request =
+                    build_send_request_with_raw_memo(to_address, amount_zatoshi, memo_bytes)?;
                 propose_send_with_reserved_notes(
                     &db,
                     network,
@@ -3311,16 +3335,21 @@ fn build_send_request(
     amount_zatoshi: u64,
     memo_str: Option<&str>,
 ) -> Result<TransactionRequest, String> {
+    build_send_request_with_raw_memo(to_address, amount_zatoshi, memo_str.map(str::as_bytes))
+}
+
+fn build_send_request_with_raw_memo(
+    to_address: &str,
+    amount_zatoshi: u64,
+    memo_bytes: Option<&[u8]>,
+) -> Result<TransactionRequest, String> {
     let to: zcash_address::ZcashAddress = to_address
         .parse()
         .map_err(|e| format!("Bad address: {e}"))?;
     let value = Zatoshis::from_u64(amount_zatoshi).map_err(|_| "Bad amount")?;
-    let memo_bytes = match memo_str {
-        Some(m) => {
-            let bytes = MemoBytes::from(
-                Memo::from_bytes(m.as_bytes()).map_err(|e| format!("Bad memo: {e}"))?,
-            );
-            Some(bytes)
+    let memo_bytes = match memo_bytes {
+        Some(bytes) => {
+            Some(MemoBytes::from_bytes(bytes).map_err(|error| format!("Bad memo bytes: {error}"))?)
         }
         None => None,
     };
@@ -5892,7 +5921,7 @@ async fn broadcast_raw_transaction(
 /// enabled. Reusing the base Tor client here would allow independent wallet or
 /// Ironwood transactions to share a circuit and become linkable by transport
 /// metadata.
-async fn broadcast_raw_transaction_isolated(
+pub(crate) async fn broadcast_raw_transaction_isolated(
     lightwalletd_url: &str,
     raw_tx: &[u8],
 ) -> Result<(), String> {

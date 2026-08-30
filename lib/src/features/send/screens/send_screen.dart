@@ -33,6 +33,7 @@ import '../../address_book/models/address_book_contact.dart';
 import '../../address_book/providers/address_book_provider.dart';
 import '../../address_book/widgets/address_book_contact_picker_modal.dart';
 import '../../migration/providers/ironwood_migration_announcement_provider.dart';
+import '../../names/services/zec_name_resolution.dart';
 import '../models/send_prefill_args.dart';
 import '../services/send_amount_conversion.dart';
 import '../services/send_flow.dart';
@@ -206,6 +207,13 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
   bool _contactPickerOpen = false;
   String? _error;
   String _addressType = '';
+  // Coppice/Names resolution for a typed `name.zec` recipient: the field
+  // keeps the name while payments use the resolved payment address.
+  String? _resolvedNameAddress;
+  String? _resolvedName;
+  BigInt? _resolvedNameTipHeight;
+  String? _zecNameError;
+  Timer? _zecNameDebounce;
   String?
   _amountError; // null = no error, empty string = silent invalid (empty/dot)
   // Canonical wallet amount used for validation and Rust calls. The controller
@@ -258,6 +266,7 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
   @override
   void dispose() {
     _maxDebounceTimer?.cancel();
+    _zecNameDebounce?.cancel();
     _memoController.removeListener(_handleMemoChanged);
     _addressFocusNode.removeListener(_handleFieldVisualStateChanged);
     _amountFocusNode.removeListener(_handleFieldVisualStateChanged);
@@ -345,9 +354,34 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
     final addr = _addressController.text.trim();
     if (addr.isEmpty) {
       if (!mounted || seq != _addressSeq) return;
-      setState(() => _addressType = '');
+      setState(() {
+        _addressType = '';
+        _clearZecNameResolution();
+      });
       _handleAddressValidationSettled();
       return;
+    }
+    if (looksLikeZecName(addr)) {
+      // Name resolution queries the chain — debounce it so typing does not
+      // fire a resolver pass per keystroke. The timer resolves with the seq
+      // current at fire time; further edits bump _addressSeq and abort it.
+      _zecNameDebounce?.cancel();
+      if (!mounted || seq != _addressSeq) return;
+      setState(() {
+        _addressType = '';
+        _zecNameError = null;
+      });
+      _zecNameDebounce = Timer(kZecNameResolveDebounce, () {
+        unawaited(_validateZecName(addr));
+      });
+      _handleAddressValidationSettled();
+      return;
+    }
+    if (_resolvedNameAddress != null ||
+        _resolvedName != null ||
+        _zecNameError != null) {
+      if (!mounted || seq != _addressSeq) return;
+      setState(_clearZecNameResolution);
     }
     try {
       final result = await rust_sync.validateAddress(address: addr);
@@ -372,6 +406,61 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
     }
   }
 
+  /// Resolves a `name.zec` recipient through Coppice/Names and validates the
+  /// resulting payment address. Only an `active` lease yields an address —
+  /// other lifecycle states land here as a typed error and an invalid field.
+  Future<void> _validateZecName(String rawName) async {
+    final seq = ++_addressSeq;
+    final name = rawName.trim().toLowerCase();
+    try {
+      final dbPath = await ref.read(sendWalletDbPathProvider).call();
+      final endpoint = ref.read(rpcEndpointProvider);
+      if (!mounted || seq != _addressSeq) return;
+      final resolution = await ref.read(zecNameResolverProvider)(
+        name,
+        dbPath: dbPath,
+        lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
+        network: endpoint.networkName,
+      );
+      if (!mounted || seq != _addressSeq) return;
+      final result = await rust_sync.validateAddress(
+        address: resolution.paymentAddress,
+      );
+      if (!mounted || seq != _addressSeq) return;
+      setState(() {
+        _resolvedName = resolution.name;
+        _resolvedNameAddress = resolution.paymentAddress;
+        _resolvedNameTipHeight = resolution.tipHeight;
+        _zecNameError = null;
+        _addressType = result.isValid ? result.addressType : 'invalid';
+        if (_isTransparentLikeType(_addressType)) {
+          _messageExpanded = false;
+        }
+      });
+    } on ZecNameResolutionException catch (error) {
+      log('Send: name resolution failed: $error');
+      if (!mounted || seq != _addressSeq) return;
+      setState(() {
+        _resolvedName = name;
+        _resolvedNameAddress = null;
+        _resolvedNameTipHeight = null;
+        _zecNameError = error.message;
+        _addressType = 'invalid';
+      });
+    } catch (e) {
+      log('Send: name resolution error: $e');
+      if (!mounted || seq != _addressSeq) return;
+      setState(() {
+        _resolvedName = name;
+        _resolvedNameAddress = null;
+        _resolvedNameTipHeight = null;
+        _zecNameError = friendlyZecNameResolutionError(e);
+        _addressType = 'error';
+      });
+    }
+    _handleAddressValidationSettled();
+  }
+
   void _handleAddressValidationSettled() {
     if (_isMaxMode) {
       _scheduleMaxEstimate();
@@ -383,9 +472,11 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
   void _handleAddressChanged() {
     _addressSeq++;
     _maxDebounceTimer?.cancel();
+    _zecNameDebounce?.cancel();
     setState(() {
       _addressType = '';
       _error = null;
+      _clearZecNameResolution();
       if (_isMaxMode) {
         _validateSeq++;
         _maxSeq++;
@@ -544,6 +635,78 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
       _addressType != 'invalid' &&
       _addressType != 'error';
 
+  /// The address the payment actually uses: a resolved `.zec` payment
+  /// address when the field holds a name, otherwise the typed text.
+  String get _destinationAddress =>
+      _resolvedNameAddress ?? _addressController.text.trim();
+
+  void _clearZecNameResolution() {
+    _resolvedNameAddress = null;
+    _resolvedName = null;
+    _resolvedNameTipHeight = null;
+    _zecNameError = null;
+  }
+
+  Future<bool> _revalidateZecNameBeforeProposal() async {
+    final name = _resolvedName;
+    final previousAddress = _resolvedNameAddress;
+    if (name == null || previousAddress == null) return true;
+    try {
+      final dbPath = await ref.read(sendWalletDbPathProvider).call();
+      final endpoint = ref.read(rpcEndpointProvider);
+      final current = await ref.read(zecNameResolverProvider)(
+        name,
+        dbPath: dbPath,
+        lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
+        network: endpoint.networkName,
+      );
+      final validated = await rust_sync.validateAddress(
+        address: current.paymentAddress,
+      );
+      if (!mounted) return false;
+      final changed = changedZecNameRecipientMessage(
+        name: name,
+        previousAddress: previousAddress,
+        current: current,
+      );
+      setState(() {
+        _resolvedNameAddress = current.paymentAddress;
+        _resolvedNameTipHeight = current.tipHeight;
+        _addressType = validated.isValid ? validated.addressType : 'invalid';
+        if (changed != null) {
+          _error = changed;
+          _maxQuote = null;
+        }
+      });
+      if (changed != null) {
+        _handleAddressValidationSettled();
+        return false;
+      }
+      return validated.isValid;
+    } on ZecNameResolutionException catch (error) {
+      if (!mounted) return false;
+      setState(() {
+        _resolvedNameAddress = null;
+        _resolvedNameTipHeight = null;
+        _zecNameError = error.message;
+        _addressType = 'invalid';
+        _error = error.message;
+      });
+      return false;
+    } catch (error) {
+      if (!mounted) return false;
+      final message = friendlyZecNameResolutionError(error);
+      setState(() {
+        _resolvedNameAddress = null;
+        _resolvedNameTipHeight = null;
+        _zecNameError = message;
+        _addressType = 'error';
+        _error = message;
+      });
+      return false;
+    }
+  }
+
   bool get _isShieldedAddress =>
       _addressType == 'unified' || _addressType == 'sapling';
 
@@ -573,7 +736,7 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
     final quote = _maxQuote;
     if (quote == null) return false;
     return quote.accountUuid == widget.activeAccountUuid &&
-        quote.address == _addressController.text.trim() &&
+        quote.address == _destinationAddress &&
         quote.memo == _effectiveMemo &&
         parseZecAmount(_amountText.trim()) == quote.amountZatoshi;
   }
@@ -662,7 +825,7 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
 
   Future<void> _resolveMaxEstimate(int seq) async {
     final accountUuid = widget.activeAccountUuid;
-    final address = _addressController.text.trim();
+    final address = _destinationAddress;
     final memo = _effectiveMemo;
     if (accountUuid == null || !_isMaxMode || seq != _maxSeq) return;
 
@@ -778,7 +941,7 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
       return;
     }
 
-    final address = _addressController.text.trim();
+    final address = _destinationAddress;
     if (address.isEmpty ||
         _addressType == 'invalid' ||
         _addressType == 'error' ||
@@ -860,7 +1023,6 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
     var pushedReview = false;
 
     try {
-      final address = _addressController.text.trim();
       final amountZatoshi = parseZecAmount(_amountText.trim());
 
       if (_isResolvingMax) {
@@ -904,6 +1066,13 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
         });
         return;
       }
+
+      if (!await _revalidateZecNameBeforeProposal()) {
+        if (mounted) setState(() => _isSending = false);
+        return;
+      }
+
+      final address = _destinationAddress;
 
       final memo = _effectiveMemo;
 
@@ -1032,17 +1201,25 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
     if (_hasValidAddress) {
       final recipient = sendReviewRecipientFor(
         contacts: addressBookContacts,
-        address: _addressController.text.trim(),
+        address: _destinationAddress,
         ownAccounts: ref.watch(ownAccountAddressesProvider).value ?? const {},
       );
       if (recipient is SendReviewContactRecipient) {
         matchedRecipientName = recipient.name;
       }
     }
+    // A resolved `.zec` name annotates the destination the same way a
+    // contact match does, so the user can tie the field text to the address
+    // the payment will actually use.
+    final resolvedRecipientName = _resolvedName == null
+        ? matchedRecipientName
+        : _resolvedNameTipHeight == null
+        ? 'Resolved from $_resolvedName'
+        : 'Resolved from $_resolvedName at height $_resolvedNameTipHeight';
     final addressMessage = switch (_addressType) {
-      'invalid' => 'Invalid address',
-      'error' => 'Address validation failed',
-      _ => matchedRecipientName,
+      'invalid' => _zecNameError ?? 'Invalid address',
+      'error' => _zecNameError ?? 'Address validation failed',
+      _ => resolvedRecipientName,
     };
     final addressMessageIcon = switch (_addressType) {
       'invalid' || 'error' => AppIcon(
@@ -1051,7 +1228,7 @@ class _SendComposeBodyState extends ConsumerState<_SendComposeBody> {
         color: colors.text.destructive,
       ),
       _ =>
-        matchedRecipientName == null
+        resolvedRecipientName == null
             ? null
             : AppIcon(AppIcons.user, size: 16, color: colors.icon.brandCrimson),
     };

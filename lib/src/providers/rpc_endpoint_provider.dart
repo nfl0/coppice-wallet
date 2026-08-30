@@ -63,7 +63,7 @@ class RpcEndpointNotifier extends Notifier<RpcEndpointConfig> {
     final chainName = await rust_wallet.getLightwalletdChainName(
       lightwalletdUrl: lightwalletdUrl,
     );
-    if (chainName != state.networkName) {
+    if (!rpcChainNameMatchesNetwork(chainName, state.networkName)) {
       throw FormatException(
         'Endpoint is for $chainName, but this wallet uses ${state.networkName}.',
       );

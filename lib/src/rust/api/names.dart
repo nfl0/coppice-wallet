@@ -52,6 +52,89 @@ ApiNamesWalletStatus getNamesV1Status({
   network: network,
 );
 
+/// Checks the selected account for an exact, spendable and unreserved one-ZEC
+/// Ironwood note. A `needs_preparation` result tells the UI to ask the wallet
+/// send engine for an ordinary one-ZEC self-transfer before COMMIT.
+ApiNamesBondStatus getNamesV1BondStatus({
+  required String dbPath,
+  required String network,
+  required String accountUuid,
+}) => RustLib.instance.api.crateApiNamesGetNamesV1BondStatus(
+  dbPath: dbPath,
+  network: network,
+  accountUuid: accountUuid,
+);
+
+List<ApiManagedName> getManagedNamesV1({
+  required String dbPath,
+  required String network,
+  required String accountUuid,
+}) => RustLib.instance.api.crateApiNamesGetManagedNamesV1(
+  dbPath: dbPath,
+  network: network,
+  accountUuid: accountUuid,
+);
+
+/// Reserve the exact one-ZEC registration bond and create a COMMIT carrier
+/// proposal. This intentionally does not broadcast: the established wallet
+/// review and credential flow remains the sole transaction-execution path.
+Future<ApiNamesCommitProposal> beginNamesV1Registration({
+  required String dbPath,
+  required String network,
+  required String accountUuid,
+  required String sendFlowId,
+  required String name,
+  required String paymentAddress,
+  required List<int> mnemonicBytes,
+}) => RustLib.instance.api.crateApiNamesBeginNamesV1Registration(
+  dbPath: dbPath,
+  network: network,
+  accountUuid: accountUuid,
+  sendFlowId: sendFlowId,
+  name: name,
+  paymentAddress: paymentAddress,
+  mnemonicBytes: mnemonicBytes,
+);
+
+/// Proves and broadcasts REVEAL after the runtime has authenticated the exact
+/// accepted COMMIT and the canonical schedule reaches this name's anchor.
+Future<Uint8List> revealNamesV1Registration({
+  required String dbPath,
+  required String lightwalletdUrl,
+  required String network,
+  required String accountUuid,
+  required String name,
+  required List<int> mnemonicBytes,
+}) => RustLib.instance.api.crateApiNamesRevealNamesV1Registration(
+  dbPath: dbPath,
+  lightwalletdUrl: lightwalletdUrl,
+  network: network,
+  accountUuid: accountUuid,
+  name: name,
+  mnemonicBytes: mnemonicBytes,
+);
+
+/// Proves and broadcasts one canonical current-head transition.
+Future<Uint8List> manageNameV1({
+  required String dbPath,
+  required String lightwalletdUrl,
+  required String network,
+  required String accountUuid,
+  required String name,
+  required String action,
+  String? paymentAddress,
+  required List<int> mnemonicBytes,
+}) => RustLib.instance.api.crateApiNamesManageNameV1(
+  dbPath: dbPath,
+  lightwalletdUrl: lightwalletdUrl,
+  network: network,
+  accountUuid: accountUuid,
+  name: name,
+  action: action,
+  paymentAddress: paymentAddress,
+  mnemonicBytes: mnemonicBytes,
+);
+
 Future<ApiNamesWalletStatus> bootstrapNamesV1({
   required String dbPath,
   required String lightwalletdUrl,
@@ -73,6 +156,96 @@ Future<ApiNamesResolution> resolveNameV1({
   network: network,
   name: name,
 );
+
+class ApiManagedName {
+  final String name;
+  final String? paymentAddress;
+  final String phase;
+  final Uint8List commitment;
+
+  const ApiManagedName({
+    required this.name,
+    this.paymentAddress,
+    required this.phase,
+    required this.commitment,
+  });
+
+  @override
+  int get hashCode =>
+      name.hashCode ^
+      paymentAddress.hashCode ^
+      phase.hashCode ^
+      commitment.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ApiManagedName &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          paymentAddress == other.paymentAddress &&
+          phase == other.phase &&
+          commitment == other.commitment;
+}
+
+/// Wallet-owned denomination readiness for starting a registration.
+class ApiNamesBondStatus {
+  final String state;
+  final BigInt requiredZatoshi;
+  final int exactNoteCount;
+  final BigInt spendableIronwoodZatoshi;
+
+  const ApiNamesBondStatus({
+    required this.state,
+    required this.requiredZatoshi,
+    required this.exactNoteCount,
+    required this.spendableIronwoodZatoshi,
+  });
+
+  @override
+  int get hashCode =>
+      state.hashCode ^
+      requiredZatoshi.hashCode ^
+      exactNoteCount.hashCode ^
+      spendableIronwoodZatoshi.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ApiNamesBondStatus &&
+          runtimeType == other.runtimeType &&
+          state == other.state &&
+          requiredZatoshi == other.requiredZatoshi &&
+          exactNoteCount == other.exactNoteCount &&
+          spendableIronwoodZatoshi == other.spendableIronwoodZatoshi;
+}
+
+/// Ordinary-wallet proposal that carries a Names COMMIT. The caller sends it
+/// through the same review/prove/broadcast path as every other wallet send.
+class ApiNamesCommitProposal {
+  final BigInt proposalId;
+  final BigInt feeZatoshi;
+  final Uint8List commitment;
+
+  const ApiNamesCommitProposal({
+    required this.proposalId,
+    required this.feeZatoshi,
+    required this.commitment,
+  });
+
+  @override
+  int get hashCode =>
+      proposalId.hashCode ^ feeZatoshi.hashCode ^ commitment.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ApiNamesCommitProposal &&
+          runtimeType == other.runtimeType &&
+          proposalId == other.proposalId &&
+          feeZatoshi == other.feeZatoshi &&
+          commitment == other.commitment;
+}
 
 class ApiNamesResolution {
   final String status;

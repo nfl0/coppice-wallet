@@ -34,6 +34,7 @@ import '../../../address_book/models/address_book_contact.dart';
 import '../../../address_book/providers/address_book_provider.dart';
 import '../../../address_book/widgets/contact_name_inline.dart';
 import '../../../migration/providers/ironwood_migration_announcement_provider.dart';
+import '../../../names/services/zec_name_resolution.dart';
 import '../../services/send_flow.dart';
 import '../../services/send_amount_conversion.dart';
 import '../../services/send_proving_key_warmup.dart';
@@ -169,6 +170,9 @@ class MobileSendAmountArgs {
     required this.sendFlowId,
     required this.recipient,
     required this.addressType,
+    this.resolvedName,
+    this.resolvedNameAddress,
+    this.resolvedNameTipHeight,
     this.contactLabel,
     this.contactPictureId,
   });
@@ -176,6 +180,9 @@ class MobileSendAmountArgs {
   final String sendFlowId;
   final String recipient;
   final String addressType;
+  final String? resolvedName;
+  final String? resolvedNameAddress;
+  final BigInt? resolvedNameTipHeight;
   final String? contactLabel;
   final String? contactPictureId;
 }
@@ -186,6 +193,9 @@ class MobileSendReviewDraftArgs {
     required this.recipient,
     required this.addressType,
     required this.amountText,
+    this.resolvedName,
+    this.resolvedNameAddress,
+    this.resolvedNameTipHeight,
     this.feeZatoshi,
     this.isMaxMode = false,
     this.memo,
@@ -197,6 +207,9 @@ class MobileSendReviewDraftArgs {
   final String recipient;
   final String addressType;
   final String amountText;
+  final String? resolvedName;
+  final String? resolvedNameAddress;
+  final BigInt? resolvedNameTipHeight;
   final BigInt? feeZatoshi;
   final bool isMaxMode;
   final String? memo;
@@ -217,6 +230,9 @@ class MobileSendAmountScreen extends StatelessWidget {
       initialSendFlowId: args.sendFlowId,
       initialRecipient: args.recipient,
       initialAddressType: args.addressType,
+      initialResolvedName: args.resolvedName,
+      initialResolvedNameAddress: args.resolvedNameAddress,
+      initialResolvedNameTipHeight: args.resolvedNameTipHeight,
       initialContactLabel: args.contactLabel,
       initialContactPictureId: args.contactPictureId,
     );
@@ -237,6 +253,9 @@ class MobileSendReviewScreen extends StatelessWidget {
       initialSendFlowId: args.sendFlowId,
       initialRecipient: args.recipient,
       initialAddressType: args.addressType,
+      initialResolvedName: args.resolvedName,
+      initialResolvedNameAddress: args.resolvedNameAddress,
+      initialResolvedNameTipHeight: args.resolvedNameTipHeight,
       initialAmount: args.amountText,
       initialFeeZatoshi: args.feeZatoshi,
       refreshReviewFeeOnInit: true,
@@ -300,6 +319,9 @@ class MobileSendScreen extends ConsumerStatefulWidget {
     this.initialSendFlowId,
     this.initialRecipient,
     this.initialAddressType,
+    this.initialResolvedName,
+    this.initialResolvedNameAddress,
+    this.initialResolvedNameTipHeight,
     this.initialAmount,
     this.initialFiatAmount,
     this.initialAmountInputMode = MobileSendAmountInputMode.zec,
@@ -325,6 +347,9 @@ class MobileSendScreen extends ConsumerStatefulWidget {
   /// "Send ZEC" action passes that account's shielded address).
   final String? initialRecipient;
   final String? initialAddressType;
+  final String? initialResolvedName;
+  final String? initialResolvedNameAddress;
+  final BigInt? initialResolvedNameTipHeight;
 
   /// Preview/test seam for opening the amount step with a preset value.
   final bool initialAmountStep;
@@ -372,6 +397,13 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
 
   // Recipient state.
   String _addressType = '';
+  // Coppice/Names resolution for a typed `name.zec` recipient: the field
+  // keeps the name while payments use the resolved payment address.
+  String? _resolvedNameAddress;
+  String? _resolvedName;
+  BigInt? _resolvedNameTipHeight;
+  String? _zecNameError;
+  Timer? _zecNameDebounce;
   String? _contactLabel;
   String? _contactPictureId;
   int _addressSeq = 0;
@@ -419,6 +451,9 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
         unawaited(_validateAddress());
       }
     }
+    _resolvedName = widget.initialResolvedName;
+    _resolvedNameAddress = widget.initialResolvedNameAddress;
+    _resolvedNameTipHeight = widget.initialResolvedNameTipHeight;
     final initialContactLabel = widget.initialContactLabel;
     if (initialContactLabel != null && initialContactLabel.trim().isNotEmpty) {
       _contactLabel = initialContactLabel.trim();
@@ -469,6 +504,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
   void dispose() {
     _addressFocus.removeListener(_handleAddressFocusChanged);
     _amountFocus.removeListener(_handleAmountFocusChanged);
+    _zecNameDebounce?.cancel();
     _addressController.dispose();
     _addressFocus.dispose();
     _amountController.dispose();
@@ -483,6 +519,18 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
       _addressType.isNotEmpty &&
       _addressType != 'invalid' &&
       _addressType != 'error';
+
+  /// The address the payment actually uses: a resolved `.zec` payment
+  /// address when the field holds a name, otherwise the typed text.
+  String get _destinationAddress =>
+      _resolvedNameAddress ?? _addressController.text.trim();
+
+  void _clearZecNameResolution() {
+    _resolvedNameAddress = null;
+    _resolvedName = null;
+    _resolvedNameTipHeight = null;
+    _zecNameError = null;
+  }
 
   static const _notEnoughZecText = 'Not enough ZEC';
 
@@ -520,8 +568,34 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
     final seq = ++_addressSeq;
     final address = _addressController.text.trim();
     if (address.isEmpty) {
-      if (mounted && seq == _addressSeq) setState(() => _addressType = '');
+      if (mounted && seq == _addressSeq) {
+        setState(() {
+          _addressType = '';
+          _clearZecNameResolution();
+        });
+      }
       return;
+    }
+    if (looksLikeZecName(address)) {
+      // Name resolution queries the chain — debounce it so typing does not
+      // fire a resolver pass per keystroke.
+      _zecNameDebounce?.cancel();
+      if (mounted && seq == _addressSeq) {
+        setState(() {
+          _addressType = '';
+          _zecNameError = null;
+        });
+      }
+      _zecNameDebounce = Timer(kZecNameResolveDebounce, () {
+        unawaited(_validateZecName(address));
+      });
+      return;
+    }
+    if (_resolvedNameAddress != null ||
+        _resolvedName != null ||
+        _zecNameError != null) {
+      if (!mounted || seq != _addressSeq) return;
+      setState(_clearZecNameResolution);
     }
     try {
       final result =
@@ -539,17 +613,135 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
     }
   }
 
+  /// Resolves a `name.zec` recipient through Coppice/Names and validates the
+  /// resulting payment address. Only an `active` lease yields an address —
+  /// other lifecycle states land here as a typed error and an invalid field.
+  Future<void> _validateZecName(String rawName) async {
+    final seq = ++_addressSeq;
+    final name = rawName.trim().toLowerCase();
+    try {
+      final dbPath = await widget.loadWalletDbPath();
+      final endpoint = ref.read(rpcEndpointProvider);
+      if (!mounted || seq != _addressSeq) return;
+      final resolution = await ref.read(zecNameResolverProvider)(
+        name,
+        dbPath: dbPath,
+        lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
+        network: endpoint.networkName,
+      );
+      if (!mounted || seq != _addressSeq) return;
+      final result = await rust_sync.validateAddress(
+        address: resolution.paymentAddress,
+      );
+      if (!mounted || seq != _addressSeq) return;
+      setState(() {
+        _resolvedName = resolution.name;
+        _resolvedNameAddress = resolution.paymentAddress;
+        _resolvedNameTipHeight = resolution.tipHeight;
+        _zecNameError = null;
+        _addressType = result.isValid ? result.addressType : 'invalid';
+      });
+    } on ZecNameResolutionException catch (error) {
+      log('MobileSend: name resolution failed: $error');
+      if (!mounted || seq != _addressSeq) return;
+      setState(() {
+        _resolvedName = name;
+        _resolvedNameAddress = null;
+        _resolvedNameTipHeight = null;
+        _zecNameError = error.message;
+        _addressType = 'invalid';
+      });
+    } catch (e) {
+      log('MobileSend: name resolution error: $e');
+      if (!mounted || seq != _addressSeq) return;
+      setState(() {
+        _resolvedName = name;
+        _resolvedNameAddress = null;
+        _resolvedNameTipHeight = null;
+        _zecNameError = friendlyZecNameResolutionError(e);
+        _addressType = 'error';
+      });
+    }
+  }
+
   void _handleAddressChanged({bool clearContact = true}) {
+    _zecNameDebounce?.cancel();
     setState(() {
       if (clearContact) {
         _contactLabel = null;
         _contactPictureId = null;
       }
       _addressType = '';
+      _clearZecNameResolution();
       _invalidateReviewFeeQuote();
       _clearMaxMode();
     });
     unawaited(_validateAddress());
+  }
+
+  Future<bool> _revalidateZecNameBeforeProposal() async {
+    final name = _resolvedName;
+    final previousAddress = _resolvedNameAddress;
+    if (name == null || previousAddress == null) return true;
+    try {
+      final dbPath = await widget.loadWalletDbPath();
+      final endpoint = ref.read(rpcEndpointProvider);
+      final current = await ref.read(zecNameResolverProvider)(
+        name,
+        dbPath: dbPath,
+        lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
+        network: endpoint.networkName,
+      );
+      final validated =
+          await (widget.validateAddress ?? rust_sync.validateAddress)(
+            address: current.paymentAddress,
+          );
+      if (!mounted) return false;
+      final changed = changedZecNameRecipientMessage(
+        name: name,
+        previousAddress: previousAddress,
+        current: current,
+      );
+      setState(() {
+        _resolvedNameAddress = current.paymentAddress;
+        _resolvedNameTipHeight = current.tipHeight;
+        _addressType = validated.isValid ? validated.addressType : 'invalid';
+        if (changed != null) {
+          _error = changed;
+          _invalidateReviewFeeQuote();
+          _clearMaxMode();
+        }
+      });
+      if (changed != null) {
+        await _refreshReviewQuote();
+        if (mounted) {
+          setState(() => _reviewFeeNotice = changed);
+        }
+        return false;
+      }
+      return validated.isValid;
+    } on ZecNameResolutionException catch (error) {
+      if (!mounted) return false;
+      setState(() {
+        _resolvedNameAddress = null;
+        _resolvedNameTipHeight = null;
+        _zecNameError = error.message;
+        _addressType = 'invalid';
+        _error = error.message;
+      });
+      return false;
+    } catch (error) {
+      if (!mounted) return false;
+      final message = friendlyZecNameResolutionError(error);
+      setState(() {
+        _resolvedNameAddress = null;
+        _resolvedNameTipHeight = null;
+        _zecNameError = message;
+        _addressType = 'error';
+        _error = message;
+      });
+      return false;
+    }
   }
 
   void _selectContact(AddressBookContact contact) {
@@ -616,6 +808,9 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
             sendFlowId: _sendFlowId,
             recipient: _addressController.text.trim(),
             addressType: _addressType,
+            resolvedName: _resolvedName,
+            resolvedNameAddress: _resolvedNameAddress,
+            resolvedNameTipHeight: _resolvedNameTipHeight,
             contactLabel: _contactLabel,
             contactPictureId: _contactPictureId,
           ),
@@ -692,7 +887,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
     final quote = _maxQuote;
     if (quote == null) return false;
     return quote.accountUuid == _activeAccountUuid &&
-        quote.address == _addressController.text.trim() &&
+        quote.address == _destinationAddress &&
         quote.memo == _effectiveMemo &&
         parseZecAmount(_amountText.trim()) == quote.amountZatoshi &&
         _feeZatoshi == quote.feeZatoshi;
@@ -708,7 +903,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
     }
     _maxQuote = _MobileSendMaxQuote(
       accountUuid: accountUuid,
-      address: _addressController.text.trim(),
+      address: _destinationAddress,
       memo: _effectiveMemo,
       amountZatoshi: amountZatoshi,
       feeZatoshi: feeZatoshi,
@@ -725,7 +920,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
     }
     _reviewFeeQuote = _MobileSendFeeQuote(
       accountUuid: accountUuid,
-      address: _addressController.text.trim(),
+      address: _destinationAddress,
       memo: _effectiveMemo,
       amountZatoshi: amountZatoshi,
       feeZatoshi: feeZatoshi,
@@ -748,7 +943,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
     if (quote == null || _isRefreshingReviewFee) return false;
     return quote.matches(
       accountUuid: _activeAccountUuid,
-      address: _addressController.text.trim(),
+      address: _destinationAddress,
       memo: _effectiveMemo,
       amountZatoshi: parseZecAmount(_amountText.trim()),
       feeZatoshi: _feeZatoshi,
@@ -878,7 +1073,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
     _validateSeq++;
     final seq = ++_maxSeq;
     final accountUuid = _activeAccountUuid;
-    final address = _addressController.text.trim();
+    final address = _destinationAddress;
     final memo = _effectiveMemo;
     final preconditionError = _maxEstimatePreconditionError();
     setState(() {
@@ -987,7 +1182,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
         _isMaxMode &&
         seq == _maxSeq &&
         _activeAccountUuid == accountUuid &&
-        _addressController.text.trim() == address &&
+        _destinationAddress == address &&
         _effectiveMemo == memo;
   }
 
@@ -1046,7 +1241,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
         dbPath: dbPath,
         network: endpoint.networkName,
         accountUuid: accountUuid,
-        toAddress: _addressController.text.trim(),
+        toAddress: _destinationAddress,
         amountZatoshi: zatoshi,
         memo: _effectiveMemo.isNotEmpty ? _effectiveMemo : null,
       );
@@ -1059,7 +1254,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
           _feeZatoshi = fee;
           _reviewFeeQuote = _MobileSendFeeQuote(
             accountUuid: accountUuid,
-            address: _addressController.text.trim(),
+            address: _destinationAddress,
             memo: _effectiveMemo,
             amountZatoshi: zatoshi,
             feeZatoshi: fee,
@@ -1109,6 +1304,9 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
             sendFlowId: _sendFlowId,
             recipient: _addressController.text.trim(),
             addressType: _addressType,
+            resolvedName: _resolvedName,
+            resolvedNameAddress: _resolvedNameAddress,
+            resolvedNameTipHeight: _resolvedNameTipHeight,
             amountText: _amountText,
             feeZatoshi: _feeZatoshi,
             isMaxMode: _isMaxMode && _hasCurrentMaxQuote,
@@ -1144,7 +1342,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
     return mounted &&
         seq == _feeSeq &&
         accountUuid == _activeAccountUuid &&
-        address == _addressController.text.trim() &&
+        address == _destinationAddress &&
         memo == _effectiveMemo &&
         amountZatoshi == parseZecAmount(_amountText.trim());
   }
@@ -1153,7 +1351,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
     final seq = ++_feeSeq;
     final zatoshi = parseZecAmount(_amountText.trim());
     final accountUuid = ref.read(accountProvider).value?.activeAccountUuid;
-    final address = _addressController.text.trim();
+    final address = _destinationAddress;
     final memo = _effectiveMemo;
     if (zatoshi == null || accountUuid == null) {
       if (mounted) {
@@ -1313,14 +1511,24 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
         .isHardwareAccount(accountUuid);
     final amountZatoshi = parseZecAmount(_amountText.trim());
     if (amountZatoshi == null || amountZatoshi <= BigInt.zero) return;
-    final reviewedFeeZatoshi = _feeZatoshi!;
-    final address = _addressController.text.trim();
-    final memo = _effectiveMemo;
-
     setState(() {
       _isConfirmingSend = true;
       _error = null;
     });
+
+    if (!await _revalidateZecNameBeforeProposal()) {
+      if (mounted) setState(() => _isConfirmingSend = false);
+      return;
+    }
+    if (!_hasCurrentReviewFeeQuote) {
+      if (mounted) setState(() => _isConfirmingSend = false);
+      unawaited(_refreshReviewQuote());
+      return;
+    }
+
+    final reviewedFeeZatoshi = _feeZatoshi!;
+    final address = _destinationAddress;
+    final memo = _effectiveMemo;
 
     SendReviewArgs args;
     try {
@@ -1927,13 +2135,15 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
     final showError = _addressType == 'invalid' || _addressType == 'error';
     // The reserved line shows the validation error, or — when the address is
     // valid and matches a saved contact / own account — the resolved name so
-    // the user knows the pasted/typed address is the intended one.
+    // the user knows the pasted/typed address is the intended one. A
+    // resolved `.zec` name annotates the destination the same way.
     Widget? line;
     if (showError) {
       line = Text(
-        _addressType == 'invalid'
-            ? 'Invalid address'
-            : 'Address validation failed',
+        _zecNameError ??
+            (_addressType == 'invalid'
+                ? 'Invalid address'
+                : 'Address validation failed'),
         style: AppTypography.labelLarge.copyWith(
           color: colors.text.destructive,
         ),
@@ -1943,10 +2153,22 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
         contacts:
             ref.watch(addressBookProvider).value?.contacts ??
             const <AddressBookContact>[],
-        address: _addressController.text.trim(),
+        address: _destinationAddress,
         ownAccounts: ref.watch(ownAccountAddressesProvider).value ?? const {},
       );
-      if (recipient is SendReviewContactRecipient) {
+      if (_resolvedName != null) {
+        line = ContactNameInline(
+          key: const ValueKey('mobile_send_address_name_match'),
+          name: _resolvedNameTipHeight == null
+              ? 'Resolved from $_resolvedName'
+              : 'Resolved from $_resolvedName at height '
+                    '$_resolvedNameTipHeight',
+          textStyle: AppTypography.labelLarge.copyWith(
+            color: colors.text.secondary,
+          ),
+          iconSize: 16,
+        );
+      } else if (recipient is SendReviewContactRecipient) {
         line = ContactNameInline(
           key: const ValueKey('mobile_send_address_contact_match'),
           name: recipient.name,
@@ -2505,7 +2727,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
     final feeText = _feeZatoshi == null
         ? '—'
         : ZecAmount.fromZatoshi(_feeZatoshi!).fee.toString();
-    final address = _addressController.text.trim();
+    final address = _destinationAddress;
     final addressBookContacts =
         ref.watch(addressBookProvider).value?.contacts ??
         const <AddressBookContact>[];
@@ -2665,8 +2887,7 @@ class _MobileSendScreenState extends ConsumerState<MobileSendScreen> {
     final amountText =
         ZecAmount.tryParse(_amountText)?.receipt.toString() ??
         '$_amountText ZEC';
-    final toLabel =
-        _contactLabel ?? _truncateAddress(_addressController.text.trim());
+    final toLabel = _contactLabel ?? _truncateAddress(_destinationAddress);
 
     return Padding(
       key: ValueKey('mobile_send_status_${_phase.name}'),

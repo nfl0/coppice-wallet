@@ -3380,6 +3380,16 @@ async fn run_sync_impl(
                             elapsed()
                         );
                         names_host_failed = true;
+                    } else if let Err(error) = crate::wallet::names_lifecycle::protect_managed_heads(
+                        db_data_path,
+                        network,
+                        host,
+                    ) {
+                        log::warn!(
+                            "[{}] sync: could not protect managed Coppice Names state notes: {error}",
+                            elapsed()
+                        );
+                        names_host_failed = true;
                     }
                 } else {
                     log::debug!(

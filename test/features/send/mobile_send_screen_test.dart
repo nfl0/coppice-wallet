@@ -18,6 +18,7 @@ import 'package:zcash_wallet/src/core/widgets/app_icon.dart';
 import 'package:zcash_wallet/src/features/address_book/models/address_book_contact.dart';
 import 'package:zcash_wallet/src/features/address_book/providers/address_book_provider.dart';
 import 'package:zcash_wallet/src/features/migration/providers/ironwood_migration_announcement_provider.dart';
+import 'package:zcash_wallet/src/features/names/services/zec_name_resolution.dart';
 import 'package:zcash_wallet/src/features/send/screens/mobile/mobile_send_screen.dart';
 import 'package:zcash_wallet/src/features/send/services/send_proving_key_warmup.dart';
 import 'package:zcash_wallet/src/features/send/widgets/send_recipient_resolver.dart';
@@ -39,6 +40,7 @@ var _proposeSendSucceeds = false;
 Completer<ProposalResult>? _proposeSendCompleter;
 BigInt _proposalFeeZatoshi = BigInt.from(10000);
 int _estimateSendMaxCalls = 0;
+int _proposeSendCalls = 0;
 String? _lastEstimateSendMaxToAddress;
 String? _lastEstimateSendMaxMemo;
 _SendMaxEstimateBuilder? _sendMaxEstimateBuilder;
@@ -120,6 +122,7 @@ class _RustApiFake implements RustLibApi {
     required BigInt amountZatoshi,
     String? memo,
   }) async {
+    _proposeSendCalls++;
     final completer = _proposeSendCompleter;
     if (completer != null) return completer.future;
     if (!_proposeSendSucceeds) {
@@ -369,6 +372,11 @@ Widget _reviewApp({
   bool refreshReviewFeeOnInit = true,
   String initialAmount = '1.5',
   BigInt? initialFeeZatoshi,
+  String initialRecipient = _shieldedAddress,
+  String? initialResolvedName,
+  String? initialResolvedNameAddress,
+  BigInt? initialResolvedNameTipHeight,
+  ZecNameResolver? resolveZecName,
 }) {
   return ProviderScope(
     overrides: [
@@ -383,6 +391,8 @@ Widget _reviewApp({
         _FakeAddressBookRepository(const []),
       ),
       ownAccountAddressesProvider.overrideWith((ref) async => const {}),
+      if (resolveZecName != null)
+        zecNameResolverProvider.overrideWithValue(resolveZecName),
     ],
     child: MaterialApp(
       home: AppTheme(
@@ -391,8 +401,11 @@ Widget _reviewApp({
           loadWalletDbPath: () async => '/tmp/zcash-test',
           initialReview: true,
           initialAmountReady: true,
-          initialRecipient: _shieldedAddress,
+          initialRecipient: initialRecipient,
           initialAddressType: 'unified',
+          initialResolvedName: initialResolvedName,
+          initialResolvedNameAddress: initialResolvedNameAddress,
+          initialResolvedNameTipHeight: initialResolvedNameTipHeight,
           initialAmount: initialAmount,
           initialFeeZatoshi: initialFeeZatoshi,
           initialMaxMode: initialMaxMode,
@@ -435,6 +448,9 @@ Widget _sendFlowRouterApp({MobileSendFeeEstimator? estimateFee}) {
             initialSendFlowId: args.sendFlowId,
             initialRecipient: args.recipient,
             initialAddressType: args.addressType,
+            initialResolvedName: args.resolvedName,
+            initialResolvedNameAddress: args.resolvedNameAddress,
+            initialResolvedNameTipHeight: args.resolvedNameTipHeight,
             initialContactLabel: args.contactLabel,
             initialContactPictureId: args.contactPictureId,
             loadWalletDbPath: () async => '/tmp/zcash-test',
@@ -454,6 +470,9 @@ Widget _sendFlowRouterApp({MobileSendFeeEstimator? estimateFee}) {
             initialSendFlowId: args.sendFlowId,
             initialRecipient: args.recipient,
             initialAddressType: args.addressType,
+            initialResolvedName: args.resolvedName,
+            initialResolvedNameAddress: args.resolvedNameAddress,
+            initialResolvedNameTipHeight: args.resolvedNameTipHeight,
             initialAmount: args.amountText,
             initialFeeZatoshi: args.feeZatoshi,
             refreshReviewFeeOnInit: true,
@@ -585,6 +604,7 @@ void main() {
     _proposeSendSucceeds = false;
     _proposeSendCompleter = null;
     _proposalFeeZatoshi = BigInt.from(10000);
+    _proposeSendCalls = 0;
     _estimateSendMaxCalls = 0;
     _lastEstimateSendMaxToAddress = null;
     _lastEstimateSendMaxMemo = null;
@@ -1014,6 +1034,59 @@ void main() {
 
     expect(find.text('status can pop'), findsOneWidget);
   });
+
+  testWidgets(
+    'a changed .zec recipient is blocked before proposal and requires review',
+    (tester) async {
+      _proposeSendSucceeds = true;
+      const changedAddress =
+          'u1changedshieldedaddress000000000000000000000000000000000000000000';
+
+      await tester.pumpWidget(
+        _reviewApp(
+          syncNotifier: _FakeSyncNotifier(),
+          initialRecipient: 'alice.zec',
+          initialResolvedName: 'alice.zec',
+          initialResolvedNameAddress: _shieldedAddress,
+          initialResolvedNameTipHeight: BigInt.from(100),
+          resolveZecName:
+              (
+                input, {
+                required dbPath,
+                required lightwalletdUrl,
+                required network,
+              }) async => ZecNameResolution(
+                name: input,
+                paymentAddress: changedAddress,
+                lifecycleStatus: 'active',
+                leaseExpiryHeight: BigInt.from(200),
+                tipHeight: BigInt.from(101),
+              ),
+          estimateFee:
+              ({
+                required dbPath,
+                required network,
+                required accountUuid,
+                required toAddress,
+                required amountZatoshi,
+                memo,
+              }) async => BigInt.from(10000),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('mobile_send_confirm')));
+      await tester.pumpAndSettle();
+
+      expect(_proposeSendCalls, 0);
+      expect(
+        find.textContaining('now resolves to a different address'),
+        findsOne,
+      );
+      expect(find.text('Review Send'), findsOneWidget);
+      expect(find.text('Send failed'), findsNothing);
+    },
+  );
 
   testWidgets('route-step send status clears intermediate send pages', (
     tester,

@@ -14,7 +14,8 @@ flutter_rust_bridge = "=2.11.1"
 # a standalone checkout instead of depending on a particular sibling layout.
 coppice = { git = "https://github.com/nfl0/coppice.git", rev = "059a8dd28caf18bb6ff769bf43681ab7cbe493a4" }
 coppice-librustzcash = { git = "https://github.com/nfl0/coppice.git", rev = "059a8dd28caf18bb6ff769bf43681ab7cbe493a4" }
-coppice-names = { git = "https://github.com/nfl0/coppice-names.git", rev = "1a34e0ab25dde9fc2cad002edff3bdbaa2ee13f6" }
+coppice-names = { git = "https://github.com/nfl0/coppice-names.git", rev = "8493941518c0e3ecb046993b9f5b4b2d29b66307" }
+coppice-names-wallet = { git = "https://github.com/nfl0/coppice-names.git", rev = "8493941518c0e3ecb046993b9f5b4b2d29b66307" }
 
 zcash_script = "0.4.3"
 voting-crypto-deps = { version = "=0.2.2" }
@@ -47,9 +48,11 @@ base64 = "0.22"
 pbkdf2 = "0.12"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
+blake2b_simd = "1"
 
 # Random number generation
 rand = "0.8"
+rand_10 = { package = "rand", version = "0.10" }
 
 # Async runtime & gRPC
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }

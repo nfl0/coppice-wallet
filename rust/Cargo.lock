@@ -961,7 +961,7 @@ dependencies = [
 [[package]]
 name = "coppice-names"
 version = "0.1.0"
-source = "git+https://github.com/nfl0/coppice-names.git?rev=1a34e0ab25dde9fc2cad002edff3bdbaa2ee13f6#1a34e0ab25dde9fc2cad002edff3bdbaa2ee13f6"
+source = "git+https://github.com/nfl0/coppice-names.git?rev=8493941518c0e3ecb046993b9f5b4b2d29b66307#8493941518c0e3ecb046993b9f5b4b2d29b66307"
 dependencies = [
  "blake2b_simd",
  "coppice",
@@ -976,6 +976,26 @@ dependencies = [
  "zakura-orchard",
  "zakura-pasta-curves",
  "zcash_address",
+]
+
+[[package]]
+name = "coppice-names-wallet"
+version = "0.1.0"
+source = "git+https://github.com/nfl0/coppice-names.git?rev=8493941518c0e3ecb046993b9f5b4b2d29b66307#8493941518c0e3ecb046993b9f5b4b2d29b66307"
+dependencies = [
+ "anyhow",
+ "coppice",
+ "coppice-names",
+ "rand 0.10.2",
+ "rand_core 0.10.1",
+ "zakura-client-backend",
+ "zakura-keys",
+ "zakura-orchard",
+ "zakura-pczt",
+ "zakura-primitives",
+ "zcash_address",
+ "zcash_protocol",
+ "zip321",
 ]
 
 [[package]]
@@ -4403,10 +4423,12 @@ dependencies = [
  "aes-gcm",
  "base64",
  "bip0039",
+ "blake2b_simd",
  "bytes",
  "coppice",
  "coppice-librustzcash",
  "coppice-names",
+ "coppice-names-wallet",
  "ff 0.14.0",
  "flutter_rust_bridge",
  "futures",
@@ -4421,6 +4443,7 @@ dependencies = [
  "nonempty",
  "pbkdf2",
  "prost 0.14.4",
+ "rand 0.10.2",
  "rand 0.8.7",
  "rand_core 0.6.4",
  "redb",

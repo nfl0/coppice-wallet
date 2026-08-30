@@ -563,6 +563,18 @@ class _AppMainSidebarState extends ConsumerState<AppMainSidebar> {
                     ),
                     const SizedBox(height: AppSpacing.xs),
                     AppSidebarItem(
+                      key: const ValueKey('sidebar_names_button'),
+                      label: 'Names',
+                      iconName: AppIcons.globe,
+                      active: _matches('/names'),
+                      onTap:
+                          isImporting ||
+                              widget.disabledRoutePaths.contains('/names')
+                          ? null
+                          : () => _navigateTo('/names'),
+                    ),
+                    const SizedBox(height: AppSpacing.xs),
+                    AppSidebarItem(
                       key: const ValueKey('sidebar_activity_button'),
                       label: 'Activity',
                       iconName: AppIcons.history,

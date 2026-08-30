@@ -224,6 +224,32 @@ bool isRpcEndpointAllowedForBuild(String lightwalletdUrl) {
       );
 }
 
+/// Whether a lightwalletd-reported chain name matches [networkName].
+///
+/// Zakura-based regtest stacks (the Coppice/Names qualification stack)
+/// report the Regtest network as "test" because zakura models Regtest with
+/// testnet consensus parameters. Regtest-compiled dev builds accept that
+/// spelling; production builds keep the exact match.
+bool rpcChainNameMatchesNetwork(String chainName, String networkName) =>
+    rpcChainNameMatchesNetworkFor(
+      chainName,
+      networkName,
+      buildDefaultNetwork: kZcashDefaultNetworkRaw,
+    );
+
+/// Pure core of [rpcChainNameMatchesNetwork] so the regtest alias rule is
+/// unit-testable without a separate regtest compile.
+bool rpcChainNameMatchesNetworkFor(
+  String chainName,
+  String networkName, {
+  required String buildDefaultNetwork,
+}) {
+  if (chainName == networkName) return true;
+  return networkName == 'regtest' &&
+      normalizeZcashNetworkName(buildDefaultNetwork) == 'regtest' &&
+      chainName == 'test';
+}
+
 RpcEndpointPreset? explicitRpcEndpointPresetFor(RpcEndpointConfig config) {
   final presetId = config.presetId?.trim();
   if (presetId == null ||
@@ -345,7 +371,10 @@ RpcEndpointPreset? findRpcEndpointPresetByUrl(
 String normalizeRpcEndpointUrl(
   String input, {
   bool allowDefaultPort = false,
-  bool allowLocalHttp = kDebugMode,
+  // Debug builds and regtest builds may target local cleartext endpoints —
+  // the local Zakura/Zaino regtest stack serves cleartext h2c on 127.0.0.1.
+  // Production builds require https.
+  bool allowLocalHttp = kDebugMode || kZcashDefaultNetworkRaw == 'regtest',
 }) {
   final trimmed = input.trim();
   if (trimmed.isEmpty) {

@@ -158,7 +158,7 @@ Future<RpcEndpointHealth> checkRpcEndpointHealth({
   required RpcEndpointLatestBlockHeightGetter getLatestBlockHeight,
 }) async {
   final chainName = await getChainName(endpoint.normalizedLightwalletdUrl);
-  if (chainName != endpoint.networkName) {
+  if (!rpcChainNameMatchesNetwork(chainName, endpoint.networkName)) {
     throw FormatException(
       'Endpoint is for $chainName, but this wallet uses ${endpoint.networkName}.',
     );

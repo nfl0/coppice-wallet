@@ -7,6 +7,7 @@ import '../../features/accounts/screens/mobile/mobile_accounts_screen.dart';
 import '../../features/activity/screens/mobile/mobile_activity_screen.dart';
 import '../../features/home/screens/mobile/mobile_home_screen.dart';
 import '../../features/home/screens/mobile/mobile_keystone_shield_screen.dart';
+import '../../features/names/screens/mobile/names_screen.dart';
 import '../../features/migration/screens/mobile/mobile_ironwood_migration_flow_screen.dart';
 import '../../features/migration/models/mobile_ironwood_migration_status_entry.dart';
 import '../../features/migration/screens/ironwood_migration_flow_screen.dart'
@@ -32,6 +33,7 @@ import '../../features/send/services/send_flow.dart'
     show KeystoneBroadcastArgs, SendReviewArgs;
 import '../../features/send/screens/mobile/mobile_send_screen.dart';
 import '../../features/send/screens/mobile/mobile_send_status_screen.dart';
+import '../../features/send/models/send_prefill_args.dart';
 import '../../rust/api/sync.dart' as rust_sync;
 import '../../features/about/screens/mobile/mobile_about_screens.dart';
 import '../../features/settings/screens/mobile/mobile_change_passcode_screen.dart';
@@ -142,11 +144,14 @@ List<RouteBase> buildMobileRoutes({required List<RouteBase> entryRoutes}) {
       path: '/send',
       pageBuilder: (context, state) {
         final extra = state.extra;
+        final prefill = extra is SendPrefillArgs ? extra : null;
         return CupertinoPage(
           key: state.pageKey,
           child: MobileSendScreen(
             useRouteSteps: true,
-            initialRecipient: extra is String ? extra : null,
+            initialRecipient:
+                prefill?.address ?? (extra is String ? extra : null),
+            initialContactLabel: prefill?.label,
           ),
         );
       },
@@ -577,6 +582,11 @@ const List<_MobileTab> _allMobileTabs = [
     path: '/activity',
     item: AppMobileTabItem(iconName: AppIcons.history, label: 'Activity'),
     screen: MobileActivityScreen(),
+  ),
+  _MobileTab(
+    path: '/names',
+    item: AppMobileTabItem(iconName: AppIcons.globe, label: 'Names'),
+    screen: MobileNamesScreen(),
   ),
   _MobileTab(
     path: '/settings',

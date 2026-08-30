@@ -237,6 +237,29 @@ struct StoredNamesWallet {
     config: NamesWalletConfig,
     core_snapshot: Option<Vec<u8>>,
     application_snapshot: Option<StoredApplicationSnapshot>,
+    /// Wallet-local registration workflow metadata. The nonce is public
+    /// randomness; the COMMIT secret is derived from the wallet seed only
+    /// while authorizing an operation and is never persisted here.
+    #[serde(default)]
+    registrations: Vec<StoredRegistration>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StoredRegistration {
+    pub account_uuid: String,
+    pub name: String,
+    pub record: Vec<u8>,
+    pub nonce: [u8; 32],
+    pub commitment: [u8; 32],
+    #[serde(default)]
+    pub send_flow_id: Option<String>,
+    #[serde(default)]
+    pub bond_txid: Option<[u8; 32]>,
+    #[serde(default)]
+    pub bond_output_index: Option<u32>,
+    pub phase: String,
+    pub commit_txid: Option<[u8; 32]>,
+    pub reveal_txid: Option<[u8; 32]>,
 }
 
 impl StoredNamesWallet {
@@ -246,6 +269,20 @@ impl StoredNamesWallet {
             config,
             core_snapshot: None,
             application_snapshot: None,
+            registrations: Vec::new(),
+        }
+    }
+
+    fn configured_preserving_local(
+        config: NamesWalletConfig,
+        registrations: Vec<StoredRegistration>,
+    ) -> Self {
+        Self {
+            format_version: STORE_FORMAT_VERSION,
+            config,
+            core_snapshot: None,
+            application_snapshot: None,
+            registrations,
         }
     }
 }
@@ -279,12 +316,47 @@ pub struct NamesResolution {
     pub predecessor_chain_steps: u64,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct NamesLifecycleContext {
+    pub params: V1Parameters,
+    pub payment_network: PaymentNetwork,
+    pub rendezvous_receiver: [u8; 43],
+    pub tip_height: u32,
+}
+
+pub(crate) fn accepted_commit(
+    db_path: &str,
+    network: WalletNetwork,
+    commitment: [u8; 32],
+) -> Result<Option<coppice_names::v1::CommitRef>, String> {
+    let stored = read_stored(&sidecar_path(db_path))?
+        .ok_or_else(|| "Names is not configured".to_string())?;
+    let host = NamesWalletHost::from_stored(network, stored)?
+        .ok_or_else(|| "Names must be bootstrapped before registration".to_string())?;
+    Ok(host.runtime.applications().pending(commitment))
+}
+
+pub(crate) fn accepted_head(
+    db_path: &str,
+    network: WalletNetwork,
+    name: &str,
+) -> Result<Option<coppice_names::v1::NameState>, String> {
+    let stored = read_stored(&sidecar_path(db_path))?
+        .ok_or_else(|| "Names is not configured".to_string())?;
+    let host = NamesWalletHost::from_stored(network, stored)?
+        .ok_or_else(|| "Names must be bootstrapped before managing names".to_string())?;
+    let name_id = coppice_names::v1::state::name_id(name)
+        .map_err(|error| format!("invalid Names name: {error:?}"))?;
+    Ok(host.runtime.applications().head(name_id).cloned())
+}
+
 /// A loaded Core + Names runtime.  The proof verifier is process-cached so a
 /// wallet does not regenerate circuit keys for every lookup or sync batch.
 pub(crate) struct NamesWalletHost {
     network: WalletNetwork,
     config: NamesWalletConfig,
     runtime: CoppiceRuntime<NamesApplication<OrchardV1ProofVerifier>>,
+    registrations: Vec<StoredRegistration>,
 }
 
 impl NamesWalletHost {
@@ -292,6 +364,7 @@ impl NamesWalletHost {
         network: WalletNetwork,
         config: NamesWalletConfig,
         checkpoint: CoreReplayActivationCheckpoint,
+        registrations: Vec<StoredRegistration>,
     ) -> Result<Self, String> {
         let parameters = config.validated_core_parameters(network)?;
         let replay_config =
@@ -317,6 +390,7 @@ impl NamesWalletHost {
             network,
             config,
             runtime,
+            registrations,
         })
     }
 
@@ -331,6 +405,7 @@ impl NamesWalletHost {
             ));
         }
         let config = stored.config.clone();
+        let registrations = stored.registrations.clone();
         let parameters = config.validated_core_parameters(network)?;
         let Some(core_snapshot) = stored.core_snapshot else {
             if stored.application_snapshot.is_some() {
@@ -366,6 +441,7 @@ impl NamesWalletHost {
             network,
             config,
             runtime,
+            registrations,
         }))
     }
 
@@ -386,6 +462,7 @@ impl NamesWalletHost {
             config: self.config.clone(),
             core_snapshot: Some(core_snapshot),
             application_snapshot: Some(application_snapshot),
+            registrations: self.registrations.clone(),
         })
     }
 
@@ -399,6 +476,28 @@ impl NamesWalletHost {
             names_activation_height: u64::from(self.config.names.activation_height),
             oldest_rewind_height: u64::from(self.runtime.oldest_rewind_height()),
         }
+    }
+
+    pub(crate) fn managed_heads(&self) -> Vec<(String, coppice_names::v1::NameState)> {
+        self.registrations
+            .iter()
+            .filter_map(|registration| {
+                let name_id = coppice_names::v1::state::name_id(&registration.name).ok()?;
+                self.runtime
+                    .applications()
+                    .head(name_id)
+                    .cloned()
+                    .map(|head| (registration.account_uuid.clone(), head))
+            })
+            .collect()
+    }
+
+    pub(crate) fn tip_height(&self) -> u32 {
+        self.runtime.tip().height
+    }
+
+    pub(crate) fn params(&self) -> V1Parameters {
+        self.config.names
     }
 
     pub(crate) fn can_apply_start(&self, start: u32) -> bool {
@@ -791,6 +890,137 @@ pub(crate) fn status(db_path: &str, network: WalletNetwork) -> Result<NamesWalle
     }
 }
 
+pub(crate) fn lifecycle_context(
+    db_path: &str,
+    network: WalletNetwork,
+) -> Result<NamesLifecycleContext, String> {
+    let stored = read_stored(&sidecar_path(db_path))?
+        .ok_or_else(|| "Names is not configured".to_string())?;
+    let receiver: [u8; 43] = stored
+        .config
+        .rendezvous_receiver
+        .clone()
+        .try_into()
+        .map_err(|bytes: Vec<u8>| format!("Names rendezvous receiver has {} bytes", bytes.len()))?;
+    let host = NamesWalletHost::from_stored(network, stored)?
+        .ok_or_else(|| "Names must be bootstrapped before registration".to_string())?;
+    Ok(NamesLifecycleContext {
+        params: host.config.names,
+        payment_network: host.config.payment_network(),
+        rendezvous_receiver: receiver,
+        tip_height: host.runtime.tip().height,
+    })
+}
+
+pub(crate) fn store_registration(
+    db_path: &str,
+    registration: StoredRegistration,
+) -> Result<(), String> {
+    let path = sidecar_path(db_path);
+    let mut stored = read_stored(&path)?.ok_or_else(|| "Names is not configured".to_string())?;
+    if stored.registrations.iter().any(|existing| {
+        existing.account_uuid == registration.account_uuid && existing.name == registration.name
+    }) {
+        return Err("this wallet account already has a registration workflow for that name".into());
+    }
+    stored.registrations.push(registration);
+    write_stored(&path, &stored)
+}
+
+pub(crate) fn registrations(db_path: &str) -> Result<Vec<StoredRegistration>, String> {
+    Ok(read_stored(&sidecar_path(db_path))?
+        .map(|stored| stored.registrations)
+        .unwrap_or_default())
+}
+
+pub(crate) fn managed_registrations(
+    db_path: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+) -> Result<Vec<StoredRegistration>, String> {
+    let stored = read_stored(&sidecar_path(db_path))?
+        .ok_or_else(|| "Names is not configured".to_string())?;
+    let host = NamesWalletHost::from_stored(network, stored.clone())?;
+    let mut registrations = stored
+        .registrations
+        .into_iter()
+        .filter(|registration| registration.account_uuid == account_uuid)
+        .collect::<Vec<_>>();
+    if let Some(host) = host {
+        for registration in &mut registrations {
+            if let Ok(name_id) = coppice_names::v1::state::name_id(&registration.name) {
+                if let Some(head) = host.runtime.applications().head(name_id) {
+                    registration.record = head.data.record.clone();
+                    registration.phase = if head.abandoned_height.is_some() {
+                        "abandoned"
+                    } else {
+                        match head.data.status {
+                            coppice_names::v1::StateStatus::Released => "released",
+                            coppice_names::v1::StateStatus::Active
+                                if host.runtime.tip().height >= head.data.lease_expiry =>
+                            {
+                                "expired"
+                            }
+                            coppice_names::v1::StateStatus::Active => "active",
+                        }
+                    }
+                    .to_string();
+                    continue;
+                }
+            }
+            if host
+                .runtime
+                .applications()
+                .pending(registration.commitment)
+                .is_some()
+            {
+                registration.phase = "commit_accepted".to_string();
+            }
+        }
+    }
+    registrations.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(registrations)
+}
+
+pub(crate) fn take_cancelled_registration(
+    db_path: &str,
+    send_flow_id: &str,
+) -> Result<Option<StoredRegistration>, String> {
+    let path = sidecar_path(db_path);
+    let Some(mut stored) = read_stored(&path)? else {
+        return Ok(None);
+    };
+    let Some(index) = stored
+        .registrations
+        .iter()
+        .position(|registration| registration.send_flow_id.as_deref() == Some(send_flow_id))
+    else {
+        return Ok(None);
+    };
+    let registration = stored.registrations.remove(index);
+    write_stored(&path, &stored)?;
+    Ok(Some(registration))
+}
+
+pub(crate) fn record_reveal_broadcast(
+    db_path: &str,
+    account_uuid: &str,
+    name: &str,
+    txid: [u8; 32],
+) -> Result<(), String> {
+    let path = sidecar_path(db_path);
+    let mut stored = read_stored(&path)?.ok_or_else(|| "Names is not configured".to_string())?;
+    let registration = stored
+        .registrations
+        .iter_mut()
+        .find(|registration| registration.account_uuid == account_uuid && registration.name == name)
+        .ok_or_else(|| "Names registration workflow is unavailable".to_string())?;
+    registration.phase = "reveal_broadcast".to_string();
+    registration.reveal_txid = Some(txid);
+    registration.send_flow_id = None;
+    write_stored(&path, &stored)
+}
+
 pub(crate) async fn bootstrap(
     db_path: &str,
     lightwalletd_url: &str,
@@ -821,7 +1051,7 @@ pub(crate) async fn bootstrap(
             ));
         }
         let checkpoint = activation_checkpoint(&mut client, base).await?;
-        NamesWalletHost::from_checkpoint(network, stored.config, checkpoint)?
+        NamesWalletHost::from_checkpoint(network, stored.config, checkpoint, stored.registrations)?
     };
 
     let mut host_tip = host.runtime.tip();
@@ -832,12 +1062,13 @@ pub(crate) async fn bootstrap(
                 .map_err(|error| error.to_string())?;
         if canonical_host_hash.0 != host_tip.block_hash {
             let config = host.config.clone();
+            let registrations = host.registrations.clone();
             let base = config
                 .runtime_activation_height
                 .checked_sub(1)
                 .ok_or_else(|| "runtime activation has no pre-activation base".to_string())?;
             let checkpoint = activation_checkpoint(&mut client, base).await?;
-            host = NamesWalletHost::from_checkpoint(network, config, checkpoint)?;
+            host = NamesWalletHost::from_checkpoint(network, config, checkpoint, registrations)?;
             host_tip = host.runtime.tip();
         }
     }
@@ -852,12 +1083,18 @@ pub(crate) async fn bootstrap(
                 .await
                 .map_err(|error| error.to_string())?;
         if canonical_tip_hash.0 != host_tip.block_hash {
-            write_stored(&path, &StoredNamesWallet::configured(host.config.clone()))?;
+            write_stored(
+                &path,
+                &StoredNamesWallet::configured_preserving_local(
+                    host.config.clone(),
+                    host.registrations.clone(),
+                ),
+            )?;
             return Err(
                 "persisted Names tip conflicts with lightwalletd; rebootstrap is required".into(),
             );
         }
-        write_stored(&path, &host.to_stored()?)?;
+        persist_host_preserving_workflows(&path, &host)?;
         return Ok(host.status());
     }
 
@@ -875,7 +1112,7 @@ pub(crate) async fn bootstrap(
         .await
         .map_err(|error| error.to_string())?;
         host.apply_compact_blocks(&mut client, blocks).await?;
-        write_stored(&path, &host.to_stored()?)?;
+        persist_host_preserving_workflows(&path, &host)?;
         next = end.saturating_add(1);
     }
     let canonical_tip_hash =
@@ -883,7 +1120,13 @@ pub(crate) async fn bootstrap(
             .await
             .map_err(|error| error.to_string())?;
     if canonical_tip_hash.0 != host.runtime.tip().block_hash {
-        write_stored(&path, &StoredNamesWallet::configured(host.config.clone()))?;
+        write_stored(
+            &path,
+            &StoredNamesWallet::configured_preserving_local(
+                host.config.clone(),
+                host.registrations.clone(),
+            ),
+        )?;
         return Err("bootstrap tip changed or failed canonical identity check".into());
     }
     Ok(host.status())
@@ -924,7 +1167,12 @@ pub(crate) async fn resolve_name(
                 ));
             }
             let checkpoint = activation_checkpoint(&mut client, base).await?;
-            NamesWalletHost::from_checkpoint(network, stored.config, checkpoint)?
+            NamesWalletHost::from_checkpoint(
+                network,
+                stored.config,
+                checkpoint,
+                stored.registrations,
+            )?
         }
     };
     host.resolve(&mut client, name, tip_height).await
@@ -941,7 +1189,21 @@ pub(crate) fn load_for_sync(
 }
 
 pub(crate) fn persist_for_sync(db_path: &str, host: &NamesWalletHost) -> Result<(), String> {
-    write_stored(&sidecar_path(db_path), &host.to_stored()?)
+    persist_host_preserving_workflows(&sidecar_path(db_path), host)
+}
+
+fn persist_host_preserving_workflows(path: &Path, host: &NamesWalletHost) -> Result<(), String> {
+    let mut checkpoint = host.to_stored()?;
+    // Sync and explicit bootstrap can run while the UI starts or advances a
+    // registration. Runtime snapshots are derived state; wallet workflows are
+    // local custody metadata and the latest durable copy must win.
+    if let Some(current) = read_stored(path)? {
+        if current.config != checkpoint.config {
+            return Err("Names configuration changed while persisting replay state".to_string());
+        }
+        checkpoint.registrations = current.registrations;
+    }
+    write_stored(path, &checkpoint)
 }
 
 /// A persisted application checkpoint contains no undo journal. If a wallet
@@ -966,7 +1228,10 @@ pub(crate) fn invalidate_after_reorg(
                 );
                 let _ = write_stored(
                     &sidecar_path(db_path),
-                    &StoredNamesWallet::configured(host.config.clone()),
+                    &StoredNamesWallet::configured_preserving_local(
+                        host.config.clone(),
+                        host.registrations.clone(),
+                    ),
                 );
             } else {
                 *hosts = Some(host);
@@ -979,7 +1244,10 @@ pub(crate) fn invalidate_after_reorg(
             );
             if let Err(write_error) = write_stored(
                 &sidecar_path(db_path),
-                &StoredNamesWallet::configured(host.config.clone()),
+                &StoredNamesWallet::configured_preserving_local(
+                    host.config.clone(),
+                    host.registrations.clone(),
+                ),
             ) {
                 log::error!(
                     "[{}] failed to persist Names rebootstrap marker: {write_error}",
@@ -998,7 +1266,10 @@ pub(crate) fn disable_after_error(db_path: &str, hosts: &mut Option<NamesWalletH
     };
     if let Err(error) = write_stored(
         &sidecar_path(db_path),
-        &StoredNamesWallet::configured(host.config.clone()),
+        &StoredNamesWallet::configured_preserving_local(
+            host.config.clone(),
+            host.registrations.clone(),
+        ),
     ) {
         log::error!(
             "[{}] failed to persist Names disabled marker: {error}",

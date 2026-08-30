@@ -15,6 +15,7 @@ import 'package:zcash_wallet/src/core/widgets/app_icon.dart';
 import 'package:zcash_wallet/src/features/address_book/models/address_book_contact.dart';
 import 'package:zcash_wallet/src/features/address_book/providers/address_book_provider.dart';
 import 'package:zcash_wallet/src/features/migration/providers/ironwood_migration_announcement_provider.dart';
+import 'package:zcash_wallet/src/features/names/services/zec_name_resolution.dart';
 import 'package:zcash_wallet/src/features/send/models/send_prefill_args.dart';
 import 'package:zcash_wallet/src/features/send/screens/send_screen.dart';
 import 'package:zcash_wallet/src/features/send/services/send_proving_key_warmup.dart';
@@ -871,6 +872,59 @@ void main() {
     expect(rustApi.lastProposeMemo, isNull);
   });
 
+  testWidgets(
+    'a changed .zec recipient is blocked before desktop proposal creation',
+    (tester) async {
+      await _setDesktopViewport(tester);
+      var resolveCalls = 0;
+      const changedAddress =
+          'u1changedshieldedaddress000000000000000000000000000000000000000000';
+
+      await tester.pumpWidget(
+        _sendHarness(
+          prefill: const SendPrefillArgs(
+            id: 'names-alice.zec',
+            source: 'names',
+            address: 'alice.zec',
+            amountText: '1.0',
+            label: 'alice.zec',
+          ),
+          resolveZecName:
+              (
+                input, {
+                required dbPath,
+                required lightwalletdUrl,
+                required network,
+              }) async {
+                resolveCalls++;
+                return ZecNameResolution(
+                  name: input,
+                  paymentAddress: resolveCalls == 1
+                      ? _shieldedAddress
+                      : changedAddress,
+                  lifecycleStatus: 'active',
+                  leaseExpiryHeight: BigInt.from(200),
+                  tipHeight: BigInt.from(100 + resolveCalls),
+                );
+              },
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 700));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('send_review_button')));
+      await tester.pumpAndSettle();
+
+      expect(resolveCalls, 2);
+      expect(rustApi.proposeSendCalls, 0);
+      expect(
+        find.textContaining('now resolves to a different address'),
+        findsOneWidget,
+      );
+      expect(find.text('Review Send'), findsNothing);
+    },
+  );
+
   testWidgets('TEX ignores transparent balance for availability', (
     tester,
   ) async {
@@ -1209,6 +1263,7 @@ Widget _sendHarness({
       const IronwoodHomeMigrationCtaState.hidden(),
   _FakeSyncNotifier? syncNotifier,
   void Function()? warmProvingKey,
+  ZecNameResolver? resolveZecName,
 }) {
   final router = GoRouter(
     initialLocation: '/send',
@@ -1248,6 +1303,8 @@ Widget _sendHarness({
       ),
       if (addressBookRepository != null)
         addressBookRepositoryProvider.overrideWithValue(addressBookRepository),
+      if (resolveZecName != null)
+        zecNameResolverProvider.overrideWithValue(resolveZecName),
     ],
     child: MaterialApp.router(
       routerConfig: router,

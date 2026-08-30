@@ -118,10 +118,24 @@ String normalizeZcashNetworkName(String networkName) {
   };
 }
 
-String resolveStoredOrDefaultZcashNetworkName(String? storedNetworkName) {
+String resolveStoredOrDefaultZcashNetworkName(String? storedNetworkName) =>
+    resolveZcashNetworkNameForBuild(storedNetworkName, kZcashDefaultNetworkRaw);
+
+/// Pure core of [resolveStoredOrDefaultZcashNetworkName] so the build rules
+/// are unit-testable without a separate regtest compile.
+///
+/// A build compiled with `ZCASH_DEFAULT_NETWORK=regtest` is an explicit
+/// test-dev build: stored state written by another build (a shared profile
+/// on Linux) must never silently switch it to another network.
+String resolveZcashNetworkNameForBuild(
+  String? storedNetworkName,
+  String buildDefaultNetwork,
+) {
   if (kZcashIronwoodMasquerade) return 'main';
+  final buildDefault = normalizeZcashNetworkName(buildDefaultNetwork);
+  if (buildDefault == 'regtest') return 'regtest';
   final stored = storedNetworkName?.trim();
-  if (stored == null || stored.isEmpty) return kZcashDefaultNetworkName;
+  if (stored == null || stored.isEmpty) return buildDefault;
   return normalizeZcashNetworkName(stored);
 }
 

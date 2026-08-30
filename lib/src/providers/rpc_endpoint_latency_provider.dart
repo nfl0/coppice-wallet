@@ -67,7 +67,7 @@ Future<RpcEndpointLatencySample> measureRpcEndpointLatency({
   try {
     final chainName = await getChainName(lightwalletdUrl);
     final elapsed = now().difference(startedAt);
-    if (chainName != expectedNetworkName) {
+    if (!rpcChainNameMatchesNetwork(chainName, expectedNetworkName)) {
       return const RpcEndpointLatencySample.wrongNetwork();
     }
     return RpcEndpointLatencySample.available(elapsed);

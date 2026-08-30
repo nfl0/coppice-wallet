@@ -6,6 +6,7 @@
 
 use crate::wallet::{coppice, keys, network::WalletNetwork};
 use flutter_rust_bridge::frb;
+use zeroize::Zeroizing;
 
 pub struct ApiNamesWalletStatus {
     pub state: String,
@@ -29,6 +30,29 @@ pub struct ApiNamesResolution {
     pub tail_blocks_scanned: u64,
     pub lineage_block_probes: u64,
     pub predecessor_chain_steps: u64,
+}
+
+/// Wallet-owned denomination readiness for starting a registration.
+pub struct ApiNamesBondStatus {
+    pub state: String,
+    pub required_zatoshi: u64,
+    pub exact_note_count: u32,
+    pub spendable_ironwood_zatoshi: u64,
+}
+
+/// Ordinary-wallet proposal that carries a Names COMMIT. The caller sends it
+/// through the same review/prove/broadcast path as every other wallet send.
+pub struct ApiNamesCommitProposal {
+    pub proposal_id: u64,
+    pub fee_zatoshi: u64,
+    pub commitment: Vec<u8>,
+}
+
+pub struct ApiManagedName {
+    pub name: String,
+    pub payment_address: Option<String>,
+    pub phase: String,
+    pub commitment: Vec<u8>,
 }
 
 impl From<coppice::NamesWalletStatus> for ApiNamesWalletStatus {
@@ -118,6 +142,151 @@ pub fn get_names_v1_status(
     let network =
         WalletNetwork::from_str(&network).ok_or_else(|| format!("Unknown network: {network}"))?;
     Ok(coppice::status(&db_path, network)?.into())
+}
+
+/// Checks the selected account for an exact, spendable and unreserved one-ZEC
+/// Ironwood note. A `needs_preparation` result tells the UI to ask the wallet
+/// send engine for an ordinary one-ZEC self-transfer before COMMIT.
+#[frb(sync)]
+pub fn get_names_v1_bond_status(
+    db_path: String,
+    network: String,
+    account_uuid: String,
+) -> Result<ApiNamesBondStatus, String> {
+    let network = keys::parse_network(&network)?;
+    keys::ensure_db_migrated_once(&db_path, network)?;
+    let status = crate::wallet::names_lifecycle::bond_status(&db_path, network, &account_uuid)?;
+    Ok(ApiNamesBondStatus {
+        state: status.state,
+        required_zatoshi: status.required_zatoshi,
+        exact_note_count: status.exact_note_count,
+        spendable_ironwood_zatoshi: status.spendable_ironwood_zatoshi,
+    })
+}
+
+#[frb(sync)]
+pub fn get_managed_names_v1(
+    db_path: String,
+    network: String,
+    account_uuid: String,
+) -> Result<Vec<ApiManagedName>, String> {
+    let network = keys::parse_network(&network)?;
+    keys::ensure_db_migrated_once(&db_path, network)?;
+    let payment_network = coppice::lifecycle_context(&db_path, network)?.payment_network;
+    coppice::managed_registrations(&db_path, network, &account_uuid)?
+        .into_iter()
+        .map(|registration| {
+            let payment_address =
+                coppice_names::v1::PaymentRecord::decode(&registration.record, payment_network)
+                    .ok()
+                    .map(|record| record.address().to_string());
+            Ok(ApiManagedName {
+                name: registration.name,
+                payment_address,
+                phase: registration.phase,
+                commitment: registration.commitment.to_vec(),
+            })
+        })
+        .collect()
+}
+
+/// Reserve the exact one-ZEC registration bond and create a COMMIT carrier
+/// proposal. This intentionally does not broadcast: the established wallet
+/// review and credential flow remains the sole transaction-execution path.
+pub fn begin_names_v1_registration(
+    db_path: String,
+    network: String,
+    account_uuid: String,
+    send_flow_id: String,
+    name: String,
+    payment_address: String,
+    mnemonic_bytes: Vec<u8>,
+) -> Result<ApiNamesCommitProposal, String> {
+    let network = keys::parse_network(&network)?;
+    keys::ensure_db_migrated_once(&db_path, network)?;
+    let mnemonic_bytes = Zeroizing::new(mnemonic_bytes);
+    let seed = keys::mnemonic_bytes_to_seed(mnemonic_bytes.as_slice())?;
+    drop(mnemonic_bytes);
+    let proposal = crate::wallet::names_lifecycle::begin_registration(
+        &db_path,
+        network,
+        &account_uuid,
+        &send_flow_id,
+        &name,
+        &payment_address,
+        seed,
+    )?;
+    Ok(ApiNamesCommitProposal {
+        proposal_id: proposal.proposal_id,
+        fee_zatoshi: proposal.fee_zatoshi,
+        commitment: proposal.commitment.to_vec(),
+    })
+}
+
+/// Proves and broadcasts REVEAL after the runtime has authenticated the exact
+/// accepted COMMIT and the canonical schedule reaches this name's anchor.
+pub fn reveal_names_v1_registration(
+    db_path: String,
+    lightwalletd_url: String,
+    network: String,
+    account_uuid: String,
+    name: String,
+    mnemonic_bytes: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let network = keys::parse_network(&network)?;
+    keys::ensure_db_migrated_once(&db_path, network)?;
+    let mnemonic_bytes = Zeroizing::new(mnemonic_bytes);
+    let seed = keys::mnemonic_bytes_to_seed(mnemonic_bytes.as_slice())?;
+    drop(mnemonic_bytes);
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| format!("tokio: {error}"))?;
+    let txid = runtime.block_on(crate::wallet::names_lifecycle::reveal_registration(
+        &db_path,
+        &lightwalletd_url,
+        network,
+        &account_uuid,
+        &name,
+        seed,
+    ))?;
+    Ok(txid.to_vec())
+}
+
+/// Proves and broadcasts one canonical current-head transition.
+pub fn manage_name_v1(
+    db_path: String,
+    lightwalletd_url: String,
+    network: String,
+    account_uuid: String,
+    name: String,
+    action: String,
+    payment_address: Option<String>,
+    mnemonic_bytes: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    use crate::wallet::names_lifecycle::NamesTransitionKind;
+
+    let network = keys::parse_network(&network)?;
+    keys::ensure_db_migrated_once(&db_path, network)?;
+    let kind = match action.as_str() {
+        "update" => NamesTransitionKind::Update(
+            payment_address.ok_or_else(|| "UPDATE requires a payment address".to_string())?,
+        ),
+        "renew" => NamesTransitionKind::Renew,
+        "release" => NamesTransitionKind::Release,
+        _ => return Err(format!("unknown Names management action: {action}")),
+    };
+    let mnemonic_bytes = Zeroizing::new(mnemonic_bytes);
+    let seed = keys::mnemonic_bytes_to_seed(mnemonic_bytes.as_slice())?;
+    drop(mnemonic_bytes);
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| format!("tokio: {error}"))?;
+    let txid = runtime.block_on(crate::wallet::names_lifecycle::execute_transition(
+        &db_path,
+        &lightwalletd_url,
+        network,
+        &account_uuid,
+        &name,
+        kind,
+        seed,
+    ))?;
+    Ok(txid.to_vec())
 }
 
 pub async fn bootstrap_names_v1(

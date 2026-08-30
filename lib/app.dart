@@ -36,6 +36,7 @@ import 'src/features/migration/screens/ironwood_migration_flow_screen.dart';
 import 'src/features/migration/widgets/ironwood_migration_privacy_lock_host.dart';
 import 'src/features/about/screens/about_screen.dart';
 import 'src/features/about/screens/mobile/mobile_about_screens.dart';
+import 'src/features/names/screens/names_screen.dart';
 import 'src/features/onboarding/create/address_types_screen.dart';
 import 'src/features/onboarding/create/customise_account_screen.dart';
 import 'src/features/onboarding/create/intro_zcash_screen.dart';
@@ -875,6 +876,7 @@ List<RouteBase> _desktopRoutes(Ref ref) => [
   GoRoute(path: '/about', builder: (_, _) => const AboutScreen()),
   GoRoute(path: '/address-book', builder: (_, _) => const AddressBookScreen()),
   GoRoute(path: '/activity', builder: (_, _) => const ActivityScreen()),
+  GoRoute(path: '/names', builder: (_, _) => const NamesScreen()),
   GoRoute(
     path: '/activity/swap/:swapId',
     builder: (_, state) {

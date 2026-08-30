@@ -2,6 +2,70 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:zcash_wallet/src/core/config/rpc_endpoint_config.dart';
 
 void main() {
+  group('rpcChainNameMatchesNetworkFor', () {
+    test('exact chain-name matches always pass', () {
+      expect(
+        rpcChainNameMatchesNetworkFor(
+          'main',
+          'main',
+          buildDefaultNetwork: 'main',
+        ),
+        isTrue,
+      );
+      expect(
+        rpcChainNameMatchesNetworkFor(
+          'regtest',
+          'regtest',
+          buildDefaultNetwork: 'regtest',
+        ),
+        isTrue,
+      );
+    });
+
+    test('a regtest build accepts the zakura "test" spelling', () {
+      // Zakura models Regtest with testnet consensus parameters, so its
+      // lightwalletd-compatible stacks report chain_name "test".
+      expect(
+        rpcChainNameMatchesNetworkFor(
+          'test',
+          'regtest',
+          buildDefaultNetwork: 'regtest',
+        ),
+        isTrue,
+      );
+    });
+
+    test('non-regtest builds reject the "test" alias for regtest', () {
+      expect(
+        rpcChainNameMatchesNetworkFor(
+          'test',
+          'regtest',
+          buildDefaultNetwork: 'main',
+        ),
+        isFalse,
+      );
+    });
+
+    test('a regtest build rejects genuinely different chains', () {
+      expect(
+        rpcChainNameMatchesNetworkFor(
+          'main',
+          'regtest',
+          buildDefaultNetwork: 'regtest',
+        ),
+        isFalse,
+      );
+      expect(
+        rpcChainNameMatchesNetworkFor(
+          'test',
+          'main',
+          buildDefaultNetwork: 'regtest',
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('normalizeRpcEndpointUrl', () {
     test('normalizes host and explicit port with an https scheme', () {
       expect(normalizeRpcEndpointUrl('zec.rocks:443'), 'https://zec.rocks:443');

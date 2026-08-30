@@ -6,6 +6,7 @@ pub(crate) mod coppice;
 pub(crate) mod db;
 pub mod keys;
 pub mod keystone;
+pub(crate) mod names_lifecycle;
 pub mod network;
 pub mod secret_payload;
 pub mod secret_store;

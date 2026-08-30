@@ -37,6 +37,24 @@ void main() {
     });
   });
 
+  group('resolveZcashNetworkNameForBuild', () {
+    test('a regtest build stays on regtest regardless of stored state', () {
+      // A regtest compile is an explicit test-dev build: stored state from
+      // another build (a shared profile on Linux) must never switch it.
+      expect(resolveZcashNetworkNameForBuild('main', 'regtest'), 'regtest');
+      expect(resolveZcashNetworkNameForBuild('test', 'regtest'), 'regtest');
+      expect(resolveZcashNetworkNameForBuild(null, 'regtest'), 'regtest');
+      expect(resolveZcashNetworkNameForBuild('garbage', 'regtest'), 'regtest');
+    });
+
+    test('non-regtest builds keep the stored-network override', () {
+      expect(resolveZcashNetworkNameForBuild('test', 'main'), 'test');
+      expect(resolveZcashNetworkNameForBuild('regtest', 'test'), 'regtest');
+      expect(resolveZcashNetworkNameForBuild(null, 'main'), 'main');
+      expect(resolveZcashNetworkNameForBuild('invalid', 'main'), 'main');
+    });
+  });
+
   group('currencyTicker', () {
     test('uses ZEC for mainnet and TAZ for test networks', () {
       expect(ZcashNetwork.mainnet.currencyTicker, 'ZEC');

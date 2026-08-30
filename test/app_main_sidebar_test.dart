@@ -654,6 +654,7 @@ void main() {
       tester.getTopLeft(find.text('Swap')).dy,
       tester.getTopLeft(find.text('Pay')).dy,
       tester.getTopLeft(find.text('Vote')).dy,
+      tester.getTopLeft(find.text('Names')).dy,
       tester.getTopLeft(find.text('Activity')).dy,
     ];
     final gaps = [

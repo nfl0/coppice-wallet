@@ -6,6 +6,7 @@ project(runner LANGUAGES CXX)
 # the on-disk name of your application.
 set(APP_IDENTIFIER "vizor")
 set(APP_DISPLAY_NAME "Vizor")
+set(APP_ICON_SOURCE_ID "app.keplr.vizor")
 # Flutter tool reads BINARY_NAME without evaluating CMake variable expansion
 # when launching `flutter run`, so keep the default executable name literal.
 set(BINARY_NAME "vizor")
@@ -110,8 +111,9 @@ install(FILES "${APP_DESKTOP_FILE}"
   COMPONENT Runtime)
 
 foreach(icon_size 16 32 48 64 256)
-  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/${icon_size}x${icon_size}/apps/${APPLICATION_ID}.png"
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/${icon_size}x${icon_size}/apps/${APP_ICON_SOURCE_ID}.png"
     DESTINATION "${INSTALL_BUNDLE_DATA_DIR}/icons/hicolor/${icon_size}x${icon_size}/apps"
+    RENAME "${APPLICATION_ID}.png"
     COMPONENT Runtime)
 endforeach()
 
