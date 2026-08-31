@@ -285,6 +285,16 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
       return null;
     }
   }
+
+  void reportAutomaticContinuationError(String error) {
+    state = NamesRegistrationState(
+      bondStatus: state.bondStatus,
+      draftName: state.draftName,
+      draftPaymentAddress: state.draftPaymentAddress,
+      draftPhase: state.draftPhase,
+      error: error,
+    );
+  }
 }
 
 String _friendlyRegistrationError(Object error) {
@@ -313,17 +323,49 @@ final managedNamesProvider =
 
 class ManagedNamesNotifier
     extends AsyncNotifier<List<rust_names.ApiManagedName>> {
+  bool _automaticRevealRunning = false;
+  final Set<String> _automaticRevealAttempts = <String>{};
+
   @override
   Future<List<rust_names.ApiManagedName>> build() async {
     ref.watch(syncProvider);
     final accountUuid = ref.watch(accountProvider).value?.activeAccountUuid;
     if (accountUuid == null) return const [];
     final endpoint = ref.watch(rpcEndpointProvider);
-    return rust_names.getManagedNamesV1(
+    final names = rust_names.getManagedNamesV1(
       dbPath: await getWalletDbPath(),
       network: endpoint.networkName,
       accountUuid: accountUuid,
     );
+    final accountNotifier = ref.read(accountProvider.notifier);
+    rust_names.ApiManagedName? ready;
+    for (final name in names) {
+      final attemptKey = '$accountUuid:${name.name}:${name.nextRevealHeight}';
+      if (name.revealReady && !_automaticRevealAttempts.contains(attemptKey)) {
+        ready = name;
+        break;
+      }
+    }
+    if (ready != null &&
+        !_automaticRevealRunning &&
+        !accountNotifier.isHardwareAccount(accountUuid)) {
+      final readyName = ready.name;
+      final attemptKey = '$accountUuid:$readyName:${ready.nextRevealHeight}';
+      _automaticRevealAttempts.add(attemptKey);
+      _automaticRevealRunning = true;
+      Future<void>.microtask(() async {
+        final error = await reveal(readyName);
+        if (error != null && ref.mounted) {
+          ref
+              .read(namesRegistrationProvider.notifier)
+              .reportAutomaticContinuationError(
+                'Automatic REVEAL for $readyName.zec failed: $error',
+              );
+        }
+        _automaticRevealRunning = false;
+      });
+    }
+    return names;
   }
 
   Future<void> refresh() async {

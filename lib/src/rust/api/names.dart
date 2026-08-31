@@ -201,6 +201,9 @@ class ApiManagedName {
   final BigInt? commitHeight;
   final BigInt? commitExpiryHeight;
   final BigInt? commitBlocksRemaining;
+  final BigInt? nextRevealHeight;
+  final BigInt? revealBlocksUntil;
+  final bool revealReady;
 
   const ApiManagedName({
     required this.name,
@@ -210,6 +213,9 @@ class ApiManagedName {
     this.commitHeight,
     this.commitExpiryHeight,
     this.commitBlocksRemaining,
+    this.nextRevealHeight,
+    this.revealBlocksUntil,
+    required this.revealReady,
   });
 
   @override
@@ -220,7 +226,10 @@ class ApiManagedName {
       commitment.hashCode ^
       commitHeight.hashCode ^
       commitExpiryHeight.hashCode ^
-      commitBlocksRemaining.hashCode;
+      commitBlocksRemaining.hashCode ^
+      nextRevealHeight.hashCode ^
+      revealBlocksUntil.hashCode ^
+      revealReady.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -233,7 +242,10 @@ class ApiManagedName {
           commitment == other.commitment &&
           commitHeight == other.commitHeight &&
           commitExpiryHeight == other.commitExpiryHeight &&
-          commitBlocksRemaining == other.commitBlocksRemaining;
+          commitBlocksRemaining == other.commitBlocksRemaining &&
+          nextRevealHeight == other.nextRevealHeight &&
+          revealBlocksUntil == other.revealBlocksUntil &&
+          revealReady == other.revealReady;
 }
 
 /// Wallet-owned denomination readiness for starting a registration.

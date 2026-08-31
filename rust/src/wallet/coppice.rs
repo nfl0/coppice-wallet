@@ -324,6 +324,7 @@ pub struct NamesResolution {
 pub(crate) struct NamesLifecycleContext {
     pub params: V1Parameters,
     pub payment_network: PaymentNetwork,
+    pub core_runtime_id: [u8; 32],
     pub rendezvous_receiver: [u8; 43],
     pub tip_height: u32,
 }
@@ -545,13 +546,22 @@ impl NamesWalletHost {
         let mut source = MapFullTransactionSource(full_transactions);
         let mut candidate = self.runtime.clone();
         for block in &blocks {
-            coppice_librustzcash::apply_compact_block(
+            let applied = coppice_librustzcash::apply_compact_block(
                 &self.network,
                 &mut candidate,
                 block,
                 &mut source,
             )
             .map_err(|error| format!("apply canonical Names block: {error:?}"))?;
+            if let Some(replay) = applied.applications.replay {
+                if !replay.operations.is_empty() {
+                    log::info!(
+                        "Names replay block {} operations: {:?}",
+                        block.height,
+                        replay.operations
+                    );
+                }
+            }
         }
         self.runtime = candidate;
         Ok(())
@@ -908,9 +918,11 @@ pub(crate) fn lifecycle_context(
         .map_err(|bytes: Vec<u8>| format!("Names rendezvous receiver has {} bytes", bytes.len()))?;
     let host = NamesWalletHost::from_stored(network, stored)?
         .ok_or_else(|| "Names must be bootstrapped before registration".to_string())?;
+    let core_runtime_id = host.runtime.core().runtime_id().to_bytes();
     Ok(NamesLifecycleContext {
         params: host.config.names,
         payment_network: host.config.payment_network(),
+        core_runtime_id,
         rendezvous_receiver: receiver,
         tip_height: host.runtime.tip().height,
     })

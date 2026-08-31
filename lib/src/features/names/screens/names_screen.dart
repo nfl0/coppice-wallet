@@ -848,7 +848,9 @@ class _RegistrationCard extends StatelessWidget {
         const SizedBox(height: AppSpacing.xxs),
         Text(
           'Registration uses an exact 1 ZEC refundable bond. If the wallet '
-          'does not have that denomination, it will prepare one first.',
+          'does not have that denomination, it will prepare one first. For '
+          'software accounts, approving the COMMIT also enables the wallet to '
+          'broadcast REVEAL automatically at the first valid block.',
           style: AppTypography.bodySmall.copyWith(color: colors.text.secondary),
         ),
         const SizedBox(height: AppSpacing.sm),
@@ -1025,10 +1027,24 @@ class _ManagedNamesCard extends StatelessWidget {
                                       color: colors.text.warning,
                                     ),
                                   ),
+                                if (item.phase == 'commit_accepted' &&
+                                    item.nextRevealHeight != null)
+                                  Text(
+                                    item.revealReady
+                                        ? 'Automatic REVEAL is being prepared for the next block.'
+                                        : 'Automatic REVEAL in ${item.revealBlocksUntil} blocks '
+                                              '(height ${item.nextRevealHeight}).',
+                                    style: AppTypography.bodySmall.copyWith(
+                                      color: item.revealReady
+                                          ? colors.text.success
+                                          : colors.text.secondary,
+                                    ),
+                                  ),
                               ],
                             ),
                           ),
-                          if (item.phase == 'commit_accepted')
+                          if (item.phase == 'commit_accepted' &&
+                              item.revealReady)
                             AppButton(
                               variant: AppButtonVariant.secondary,
                               size: AppButtonSize.medium,
@@ -1037,7 +1053,7 @@ class _ManagedNamesCard extends StatelessWidget {
                                   : null,
                               child: inFlightName == item.name
                                   ? const _InlineSpinner()
-                                  : const Text('Reveal'),
+                                  : const Text('Reveal now'),
                             ),
                           if (item.phase == 'awaiting_bond' ||
                               item.phase == 'bond_reserved')
@@ -1114,7 +1130,7 @@ String _managedPhaseLabel(String phase) => switch (phase) {
   'bond_reserved' => 'Exact 1 ZEC bond reserved — continue registration',
   'commit_proposed' => 'COMMIT proposal awaiting wallet confirmation',
   'commit_broadcast' => 'COMMIT broadcast — awaiting canonical Names replay',
-  'commit_accepted' => 'COMMIT accepted — REVEAL when scheduled',
+  'commit_accepted' => 'COMMIT accepted — automatic REVEAL pending',
   'commit_expired' => 'COMMIT expired before REVEAL',
   'reveal_broadcast' => 'REVEAL awaiting confirmation',
   'active' => 'Active',

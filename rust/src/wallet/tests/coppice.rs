@@ -1,7 +1,8 @@
 use super::super::network::WalletNetwork;
 use super::{
-    bootstrap, compact_tx_is_rendezvous, configure, contiguous_ranges, read_stored, resolve_name,
-    sidecar_path, write_stored, AcquiredCanonicalSource, NamesWalletConfig, StoredNamesWallet,
+    bootstrap, compact_tx_is_rendezvous, configure, contiguous_ranges, load_for_sync, read_stored,
+    resolve_name, sidecar_path, write_stored, AcquiredCanonicalSource, NamesWalletConfig,
+    StoredNamesWallet,
 };
 use coppice_names::v1::{CanonicalBlock, CanonicalSource};
 use std::collections::BTreeMap;
@@ -219,4 +220,20 @@ async fn live_zaino_bootstrap_and_missing_resolution() {
     assert_eq!(resolution.status, "missing");
     assert_eq!(resolution.tip_height, ready.tip_height);
     assert_eq!(resolution.tip_height, prebootstrap_resolution.tip_height);
+
+    // A caller can inject the commitment emitted by a freshly mined COMMIT
+    // to turn this smoke test into an end-to-end Core routing regression.
+    if let Ok(expected) = std::env::var("COPPICE_NAMES_TEST_COMMITMENT") {
+        let expected: [u8; 32] = hex::decode(expected)
+            .expect("test COMMITMENT must be hex")
+            .try_into()
+            .expect("test COMMITMENT must be 32 bytes");
+        let host = load_for_sync(db_path, WalletNetwork::Regtest)
+            .unwrap()
+            .expect("bootstrap must persist the Names host");
+        assert!(
+            host.runtime.applications().pending(expected).is_some(),
+            "mined COMMIT did not route through Core into Names replay"
+        );
+    }
 }

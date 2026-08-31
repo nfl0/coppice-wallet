@@ -171,7 +171,8 @@ pub(crate) fn prepare_registration_draft(
         secret: registration_secret(seed.expose_secret(), account_uuid, &canonical_name, nonce),
     };
     drop(seed);
-    let commitment = prepare_commit(&intent)
+    let core_runtime_id = coppice::lifecycle_context(db_path, network)?.core_runtime_id;
+    let commitment = prepare_commit(&intent, core_runtime_id)
         .map_err(|error| format!("prepare Names COMMIT: {error:#}"))?
         .commitment();
     coppice::store_registration(
@@ -345,8 +346,8 @@ pub(crate) fn begin_registration(
         secret: registration_secret(seed.expose_secret(), account_uuid, &canonical_name, nonce),
     };
     drop(seed);
-    let prepared =
-        prepare_commit(&intent).map_err(|error| format!("prepare Names COMMIT: {error:#}"))?;
+    let prepared = prepare_commit(&intent, context.core_runtime_id)
+        .map_err(|error| format!("prepare Names COMMIT: {error:#}"))?;
 
     let target_height = db
         .get_target_and_anchor_heights(std::num::NonZeroU32::MIN)
@@ -725,7 +726,7 @@ pub(crate) fn build_reveal(
         )
         .map_err(|error| format!("prove Names REVEAL: {error:?}"))?;
     let operation = preparation
-        .finalize(proof)
+        .finalize(proof, context.core_runtime_id)
         .map_err(|error| format!("finalize Names REVEAL: {error:#}"))?;
 
     let (shape, fee) = planned_state_operation_shape_and_fee(&network, &operation, 1, 1)
@@ -1056,7 +1057,7 @@ pub(crate) fn build_transition(
         )
         .map_err(|error| format!("prove Names {}: {error:?}", kind.label()))?;
     let operation = preparation
-        .finalize(proof)
+        .finalize(proof, context.core_runtime_id)
         .map_err(|error| format!("finalize Names {}: {error:#}", kind.label()))?;
     let (shape, fee) = planned_state_operation_shape_and_fee(&network, &operation, 1, 1)
         .map_err(|error| format!("plan Names {} fee: {error:#}", kind.label()))?;
