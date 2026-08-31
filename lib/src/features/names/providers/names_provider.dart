@@ -4,6 +4,7 @@ import '../../../../main.dart' show log;
 import '../../../core/storage/wallet_paths.dart';
 import '../../../providers/account_provider.dart';
 import '../../../providers/rpc_endpoint_provider.dart';
+import '../../../providers/sync_provider.dart';
 import '../../../rust/api/names.dart' as rust_names;
 import '../../send/services/send_flow.dart';
 import '../models/names_deployment.dart';
@@ -47,11 +48,17 @@ class NamesRegistrationState {
   const NamesRegistrationState({
     this.inFlight = false,
     this.bondStatus,
+    this.draftName,
+    this.draftPaymentAddress,
+    this.draftPhase,
     this.error,
   });
 
   final bool inFlight;
   final rust_names.ApiNamesBondStatus? bondStatus;
+  final String? draftName;
+  final String? draftPaymentAddress;
+  final String? draftPhase;
   final String? error;
 }
 
@@ -68,6 +75,19 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
   @override
   NamesRegistrationState build() => const NamesRegistrationState();
 
+  void resumeDraft({
+    required String name,
+    required String paymentAddress,
+    required String phase,
+  }) {
+    state = NamesRegistrationState(
+      bondStatus: state.bondStatus,
+      draftName: name,
+      draftPaymentAddress: paymentAddress,
+      draftPhase: phase,
+    );
+  }
+
   Future<rust_names.ApiNamesBondStatus?> refreshBondStatus() async {
     final account = ref.read(accountProvider).value;
     final accountUuid = account?.activeAccountUuid;
@@ -79,12 +99,109 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
         network: endpoint.networkName,
         accountUuid: accountUuid,
       );
-      state = NamesRegistrationState(bondStatus: status);
+      state = NamesRegistrationState(
+        bondStatus: status,
+        draftName: state.draftName,
+        draftPaymentAddress: state.draftPaymentAddress,
+        draftPhase: state.draftPhase,
+      );
       return status;
     } catch (error) {
       log('Names: bond inventory failed: $error');
       state = NamesRegistrationState(error: _friendlyRegistrationError(error));
       return null;
+    }
+  }
+
+  Future<String?> prepareDraft({
+    required String name,
+    required String paymentAddress,
+  }) async {
+    final account = ref.read(accountProvider).value;
+    final accountUuid = account?.activeAccountUuid;
+    if (accountUuid == null) {
+      state = const NamesRegistrationState(error: 'Unlock your wallet first.');
+      return null;
+    }
+    final accountNotifier = ref.read(accountProvider.notifier);
+    if (accountNotifier.isHardwareAccount(accountUuid)) {
+      state = const NamesRegistrationState(
+        error: 'Names registration currently requires a software account.',
+      );
+      return null;
+    }
+    state = NamesRegistrationState(
+      inFlight: true,
+      bondStatus: state.bondStatus,
+      draftName: name.trim().toLowerCase(),
+      draftPaymentAddress: paymentAddress.trim(),
+    );
+    final mnemonicBytes = await accountNotifier.getMnemonicBytesForAccount(
+      accountUuid,
+    );
+    if (mnemonicBytes == null || mnemonicBytes.isEmpty) {
+      state = const NamesRegistrationState(
+        error: 'The selected account credential is unavailable.',
+      );
+      return null;
+    }
+    final endpoint = ref.read(rpcEndpointProvider);
+    try {
+      late final Future<rust_names.ApiNamesRegistrationDraft> draftFuture;
+      try {
+        draftFuture = rust_names.prepareNamesV1RegistrationDraft(
+          dbPath: await getWalletDbPath(),
+          network: endpoint.networkName,
+          accountUuid: accountUuid,
+          name: name,
+          paymentAddress: paymentAddress,
+          mnemonicBytes: mnemonicBytes,
+        );
+      } finally {
+        mnemonicBytes.fillRange(0, mnemonicBytes.length, 0);
+      }
+      final draft = await draftFuture;
+      state = NamesRegistrationState(
+        bondStatus: state.bondStatus,
+        draftName: name.trim().toLowerCase(),
+        draftPaymentAddress: paymentAddress.trim(),
+        draftPhase: draft.phase,
+      );
+      return draft.phase;
+    } catch (error) {
+      log('Names: registration draft failed: $error');
+      state = NamesRegistrationState(error: _friendlyRegistrationError(error));
+      return null;
+    }
+  }
+
+  Future<void> refreshDraftPhase() async {
+    final draftName = state.draftName;
+    final accountUuid = ref.read(accountProvider).value?.activeAccountUuid;
+    if (draftName == null || accountUuid == null) return;
+    try {
+      final endpoint = ref.read(rpcEndpointProvider);
+      final names = rust_names.getManagedNamesV1(
+        dbPath: await getWalletDbPath(),
+        network: endpoint.networkName,
+        accountUuid: accountUuid,
+      );
+      rust_names.ApiManagedName? draft;
+      for (final item in names) {
+        if (item.name == draftName) {
+          draft = item;
+          break;
+        }
+      }
+      if (draft == null) return;
+      state = NamesRegistrationState(
+        bondStatus: state.bondStatus,
+        draftName: draftName,
+        draftPaymentAddress: state.draftPaymentAddress,
+        draftPhase: draft.phase,
+      );
+    } catch (error) {
+      log('Names: registration draft refresh failed: $error');
     }
   }
 
@@ -108,6 +225,9 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
     state = NamesRegistrationState(
       inFlight: true,
       bondStatus: state.bondStatus,
+      draftName: state.draftName,
+      draftPaymentAddress: state.draftPaymentAddress,
+      draftPhase: state.draftPhase,
     );
     final mnemonicBytes = await accountNotifier.getMnemonicBytesForAccount(
       accountUuid,
@@ -136,7 +256,12 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
         mnemonicBytes.fillRange(0, mnemonicBytes.length, 0);
       }
       final proposal = await proposalFuture;
-      state = NamesRegistrationState(bondStatus: state.bondStatus);
+      state = NamesRegistrationState(
+        bondStatus: state.bondStatus,
+        draftName: state.draftName,
+        draftPaymentAddress: state.draftPaymentAddress,
+        draftPhase: state.draftPhase,
+      );
       return SendReviewArgs(
         proposalId: proposal.proposalId,
         sendFlowId: sendFlowId,
@@ -152,6 +277,9 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
       log('Names: registration proposal failed: $error');
       state = NamesRegistrationState(
         bondStatus: state.bondStatus,
+        draftName: state.draftName,
+        draftPaymentAddress: state.draftPaymentAddress,
+        draftPhase: state.draftPhase,
         error: _friendlyRegistrationError(error),
       );
       return null;
@@ -178,14 +306,16 @@ final namesStatusProvider =
     >(NamesStatusNotifier.new);
 
 final managedNamesProvider =
-    AsyncNotifierProvider<ManagedNamesNotifier, List<rust_names.ApiManagedName>>(
-      ManagedNamesNotifier.new,
-    );
+    AsyncNotifierProvider<
+      ManagedNamesNotifier,
+      List<rust_names.ApiManagedName>
+    >(ManagedNamesNotifier.new);
 
 class ManagedNamesNotifier
     extends AsyncNotifier<List<rust_names.ApiManagedName>> {
   @override
   Future<List<rust_names.ApiManagedName>> build() async {
+    ref.watch(syncProvider);
     final accountUuid = ref.watch(accountProvider).value?.activeAccountUuid;
     if (accountUuid == null) return const [];
     final endpoint = ref.watch(rpcEndpointProvider);
@@ -291,6 +421,9 @@ class NamesStatusNotifier
     extends AsyncNotifier<rust_names.ApiNamesWalletStatus?> {
   @override
   Future<rust_names.ApiNamesWalletStatus?> build() async {
+    // The Names runtime is advanced by accepted wallet-sync batches. This
+    // dependency makes the tab's displayed tip advance with the wallet.
+    ref.watch(syncProvider);
     final accountUuid = ref.watch(accountProvider).value?.activeAccountUuid;
     if (accountUuid == null) return null;
     final endpoint = ref.watch(rpcEndpointProvider);

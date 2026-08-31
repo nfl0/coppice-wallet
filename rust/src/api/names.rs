@@ -48,6 +48,12 @@ pub struct ApiNamesCommitProposal {
     pub commitment: Vec<u8>,
 }
 
+/// Durable registration intent state. A draft survives the ordinary wallet
+/// self-transfer used to form an exact bond denomination.
+pub struct ApiNamesRegistrationDraft {
+    pub phase: String,
+}
+
 pub struct ApiManagedName {
     pub name: String,
     pub payment_address: Option<String>,
@@ -188,6 +194,38 @@ pub fn get_managed_names_v1(
             })
         })
         .collect()
+}
+
+/// Persist a registration intent before the wallet prepares an exact bond.
+/// If an eligible note already exists it is immediately reserved; otherwise
+/// sync will reserve the self-transfer output as soon as it is confirmed.
+pub fn prepare_names_v1_registration_draft(
+    db_path: String,
+    network: String,
+    account_uuid: String,
+    name: String,
+    payment_address: String,
+    mnemonic_bytes: Vec<u8>,
+) -> Result<ApiNamesRegistrationDraft, String> {
+    let network = keys::parse_network(&network)?;
+    keys::ensure_db_migrated_once(&db_path, network)?;
+    let mnemonic_bytes = Zeroizing::new(mnemonic_bytes);
+    let seed = keys::mnemonic_bytes_to_seed(mnemonic_bytes.as_slice())?;
+    drop(mnemonic_bytes);
+    crate::wallet::names_lifecycle::prepare_registration_draft(
+        &db_path,
+        network,
+        &account_uuid,
+        &name,
+        &payment_address,
+        seed,
+    )?;
+    let canonical_name = name.trim().to_ascii_lowercase();
+    let registration = coppice::registration(&db_path, &account_uuid, &canonical_name)?
+        .ok_or_else(|| "prepared Names registration draft disappeared".to_string())?;
+    Ok(ApiNamesRegistrationDraft {
+        phase: registration.phase,
+    })
 }
 
 /// Reserve the exact one-ZEC registration bond and create a COMMIT carrier

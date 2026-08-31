@@ -12,6 +12,7 @@ import '../../../core/widgets/app_icon_hover_button.dart';
 import '../../../core/widgets/app_text_field.dart';
 import '../../../rust/api/names.dart' as rust_names;
 import '../../../providers/account_provider.dart';
+import '../../../providers/sync_provider.dart';
 import '../../send/models/send_prefill_args.dart';
 import '../models/names_deployment.dart';
 import '../providers/names_provider.dart';
@@ -63,7 +64,16 @@ class _NamesViewState extends ConsumerState<NamesView> {
       if (!mounted || _registrationAddressController.text.isNotEmpty) return;
       _registrationAddressController.text =
           ref.read(accountProvider).value?.activeAddress ?? '';
-      ref.read(namesRegistrationProvider.notifier).refreshBondStatus();
+      final registration = ref.read(namesRegistrationProvider);
+      if (registration.draftName != null) {
+        _registrationNameController.text = registration.draftName!;
+      }
+      if (registration.draftPaymentAddress != null) {
+        _registrationAddressController.text = registration.draftPaymentAddress!;
+      }
+      final notifier = ref.read(namesRegistrationProvider.notifier);
+      notifier.refreshBondStatus();
+      notifier.refreshDraftPhase();
     });
   }
 
@@ -100,9 +110,20 @@ class _NamesViewState extends ConsumerState<NamesView> {
 
   Future<void> _registerName() async {
     final notifier = ref.read(namesRegistrationProvider.notifier);
-    final bond = await notifier.refreshBondStatus();
-    if (!mounted || bond == null) return;
-    if (bond.state == 'needs_preparation') {
+    var registration = ref.read(namesRegistrationProvider);
+    if (registration.draftName == null) {
+      await notifier.prepareDraft(
+        name: _registrationNameController.text,
+        paymentAddress: _registrationAddressController.text,
+      );
+      if (!mounted) return;
+      registration = ref.read(namesRegistrationProvider);
+    } else {
+      await notifier.refreshDraftPhase();
+      if (!mounted) return;
+      registration = ref.read(namesRegistrationProvider);
+    }
+    if (registration.draftPhase == 'awaiting_bond') {
       final ownAddress = ref.read(accountProvider).value?.activeAddress;
       if (ownAddress == null || ownAddress.isEmpty) return;
       context.go(
@@ -115,15 +136,17 @@ class _NamesViewState extends ConsumerState<NamesView> {
           label: 'Prepare Coppice Names bond',
           message:
               'Send exactly 1 ZEC to this wallet. After confirmation, return '
-              'to Names to register.',
+              'to Names and continue this registration.',
         ),
       );
       return;
     }
-    if (bond.state != 'ready') return;
+    if (registration.draftPhase != 'bond_reserved') return;
     final review = await notifier.begin(
-      name: _registrationNameController.text,
-      paymentAddress: _registrationAddressController.text,
+      name: registration.draftName ?? _registrationNameController.text,
+      paymentAddress:
+          registration.draftPaymentAddress ??
+          _registrationAddressController.text,
     );
     if (!mounted || review == null) return;
     await context.push('/send/review', extra: review);
@@ -140,6 +163,21 @@ class _NamesViewState extends ConsumerState<NamesView> {
       _managedNameInFlight = null;
       _managedNameError = error;
     });
+  }
+
+  Future<void> _resumeRegistration(rust_names.ApiManagedName item) async {
+    final address = item.paymentAddress;
+    if (address == null || address.isEmpty) return;
+    _registrationNameController.text = item.name;
+    _registrationAddressController.text = address;
+    ref
+        .read(namesRegistrationProvider.notifier)
+        .resumeDraft(
+          name: item.name,
+          paymentAddress: address,
+          phase: item.phase,
+        );
+    await _registerName();
   }
 
   Future<void> _manageName(
@@ -209,6 +247,10 @@ class _NamesViewState extends ConsumerState<NamesView> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(syncProvider, (_, next) {
+      if (!next.hasValue) return;
+      ref.read(namesRegistrationProvider.notifier).refreshDraftPhase();
+    });
     final colors = context.colors;
     final statusAsync = ref.watch(namesStatusProvider);
     final profile = ref.watch(namesDeploymentProfileProvider);
@@ -285,6 +327,7 @@ class _NamesViewState extends ConsumerState<NamesView> {
                   inFlightName: _managedNameInFlight,
                   error: _managedNameError,
                   onReveal: _revealName,
+                  onResumeRegistration: _resumeRegistration,
                   onManage: _manageName,
                   onRefresh: () =>
                       ref.read(managedNamesProvider.notifier).refresh(),
@@ -730,13 +773,18 @@ class _RegistrationCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    final hasInput = nameController.text.trim().isNotEmpty &&
+    final hasInput =
+        nameController.text.trim().isNotEmpty &&
         addressController.text.trim().isNotEmpty;
     final bond = state.bondStatus;
-    final buttonLabel = switch (bond?.state) {
-      'needs_preparation' => 'Prepare 1 ZEC note',
-      'insufficient_funds' => 'Insufficient ZEC',
-      _ => 'Register name',
+    final buttonLabel = switch (state.draftPhase) {
+      'awaiting_bond' => 'Prepare 1 ZEC note',
+      'bond_reserved' => 'Continue registration',
+      _ => switch (bond?.state) {
+        'needs_preparation' => 'Prepare 1 ZEC note',
+        'insufficient_funds' => 'Insufficient ZEC',
+        _ => 'Register name',
+      },
     };
     return _NamesCard(
       key: const ValueKey('names_registration_card'),
@@ -751,16 +799,14 @@ class _RegistrationCard extends StatelessWidget {
         Text(
           'Registration uses an exact 1 ZEC refundable bond. If the wallet '
           'does not have that denomination, it will prepare one first.',
-          style: AppTypography.bodySmall.copyWith(
-            color: colors.text.secondary,
-          ),
+          style: AppTypography.bodySmall.copyWith(color: colors.text.secondary),
         ),
         const SizedBox(height: AppSpacing.sm),
         AppTextField(
           key: const ValueKey('names_registration_name_field'),
           label: 'Name',
           controller: nameController,
-          hintText: 'alice.zec',
+          hintText: 'alice',
           enabled: available && !state.inFlight,
           inlineSuffixText: '.zec',
           onChanged: (_) {},
@@ -789,6 +835,21 @@ class _RegistrationCard extends StatelessWidget {
             ),
           ),
         ],
+        if (state.draftPhase == 'awaiting_bond') ...[
+          const SizedBox(height: AppSpacing.xs),
+          Text(
+            'Registration is saved. Confirm the 1 ZEC self-transfer, then return here.',
+            style: AppTypography.bodySmall.copyWith(
+              color: colors.text.secondary,
+            ),
+          ),
+        ] else if (state.draftPhase == 'bond_reserved') ...[
+          const SizedBox(height: AppSpacing.xs),
+          Text(
+            'The exact bond note is reserved for this name. Continue to review the COMMIT.',
+            style: AppTypography.bodySmall.copyWith(color: colors.text.success),
+          ),
+        ],
         if (state.error != null) ...[
           const SizedBox(height: AppSpacing.xs),
           Text(
@@ -806,7 +867,8 @@ class _RegistrationCard extends StatelessWidget {
             key: const ValueKey('names_registration_button'),
             variant: AppButtonVariant.primary,
             size: AppButtonSize.medium,
-            onPressed: available &&
+            onPressed:
+                available &&
                     hasInput &&
                     !state.inFlight &&
                     bond?.state != 'insufficient_funds'
@@ -826,6 +888,7 @@ class _ManagedNamesCard extends StatelessWidget {
     required this.inFlightName,
     required this.error,
     required this.onReveal,
+    required this.onResumeRegistration,
     required this.onManage,
     required this.onRefresh,
   });
@@ -834,6 +897,7 @@ class _ManagedNamesCard extends StatelessWidget {
   final String? inFlightName;
   final String? error;
   final ValueChanged<String> onReveal;
+  final ValueChanged<rust_names.ApiManagedName> onResumeRegistration;
   final void Function(rust_names.ApiManagedName, String) onManage;
   final VoidCallback onRefresh;
 
@@ -891,9 +955,8 @@ class _ManagedNamesCard extends StatelessWidget {
                               children: [
                                 Text(
                                   '${item.name}.zec',
-                                  style: AppTypography.bodyMediumStrong.copyWith(
-                                    color: colors.text.primary,
-                                  ),
+                                  style: AppTypography.bodyMediumStrong
+                                      .copyWith(color: colors.text.primary),
                                 ),
                                 Text(
                                   _managedPhaseLabel(item.phase),
@@ -914,6 +977,20 @@ class _ManagedNamesCard extends StatelessWidget {
                               child: inFlightName == item.name
                                   ? const _InlineSpinner()
                                   : const Text('Reveal'),
+                            ),
+                          if (item.phase == 'awaiting_bond' ||
+                              item.phase == 'bond_reserved')
+                            AppButton(
+                              variant: AppButtonVariant.secondary,
+                              size: AppButtonSize.medium,
+                              onPressed: inFlightName == null
+                                  ? () => onResumeRegistration(item)
+                                  : null,
+                              child: Text(
+                                item.phase == 'bond_reserved'
+                                    ? 'Continue'
+                                    : 'Prepare bond',
+                              ),
                             ),
                           if (item.phase == 'active')
                             PopupMenuButton<String>(
@@ -961,6 +1038,8 @@ class _ManagedNamesCard extends StatelessWidget {
 }
 
 String _managedPhaseLabel(String phase) => switch (phase) {
+  'awaiting_bond' => 'Awaiting exact 1 ZEC bond note',
+  'bond_reserved' => 'Exact 1 ZEC bond reserved — continue registration',
   'commit_proposed' => 'COMMIT awaiting broadcast or confirmation',
   'commit_accepted' => 'COMMIT accepted — REVEAL when scheduled',
   'reveal_broadcast' => 'REVEAL awaiting confirmation',

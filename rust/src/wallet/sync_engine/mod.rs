@@ -3390,6 +3390,17 @@ async fn run_sync_impl(
                             elapsed()
                         );
                         names_host_failed = true;
+                    } else if let Err(error) =
+                        crate::wallet::names_lifecycle::reserve_pending_bonds(db_data_path, network)
+                    {
+                        // A pending draft is wallet-local workflow state. Do
+                        // not disable authenticated Names replay merely
+                        // because reserving a just-confirmed denomination
+                        // needs a later retry.
+                        log::warn!(
+                            "[{}] sync: could not reserve a pending Coppice Names bond: {error}",
+                            elapsed()
+                        );
                     }
                 } else {
                     log::debug!(

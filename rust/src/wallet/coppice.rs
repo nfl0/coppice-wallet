@@ -933,6 +933,35 @@ pub(crate) fn registrations(db_path: &str) -> Result<Vec<StoredRegistration>, St
         .unwrap_or_default())
 }
 
+pub(crate) fn registration(
+    db_path: &str,
+    account_uuid: &str,
+    name: &str,
+) -> Result<Option<StoredRegistration>, String> {
+    Ok(read_stored(&sidecar_path(db_path))?.and_then(|stored| {
+        stored.registrations.into_iter().find(|registration| {
+            registration.account_uuid == account_uuid && registration.name == name
+        })
+    }))
+}
+
+pub(crate) fn replace_registration(
+    db_path: &str,
+    registration: StoredRegistration,
+) -> Result<(), String> {
+    let path = sidecar_path(db_path);
+    let mut stored = read_stored(&path)?.ok_or_else(|| "Names is not configured".to_string())?;
+    let existing = stored
+        .registrations
+        .iter_mut()
+        .find(|existing| {
+            existing.account_uuid == registration.account_uuid && existing.name == registration.name
+        })
+        .ok_or_else(|| "Names registration workflow is unavailable".to_string())?;
+    *existing = registration;
+    write_stored(&path, &stored)
+}
+
 pub(crate) fn managed_registrations(
     db_path: &str,
     network: WalletNetwork,

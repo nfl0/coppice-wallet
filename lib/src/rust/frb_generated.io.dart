@@ -103,6 +103,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ApiNamesCommitProposal dco_decode_api_names_commit_proposal(dynamic raw);
 
   @protected
+  ApiNamesRegistrationDraft dco_decode_api_names_registration_draft(
+    dynamic raw,
+  );
+
+  @protected
   ApiNamesResolution dco_decode_api_names_resolution(dynamic raw);
 
   @protected
@@ -957,6 +962,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ApiNamesCommitProposal sse_decode_api_names_commit_proposal(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ApiNamesRegistrationDraft sse_decode_api_names_registration_draft(
     SseDeserializer deserializer,
   );
 
@@ -2042,6 +2052,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_api_names_commit_proposal(
     ApiNamesCommitProposal self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_api_names_registration_draft(
+    ApiNamesRegistrationDraft self,
     SseSerializer serializer,
   );
 

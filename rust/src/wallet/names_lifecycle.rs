@@ -126,6 +126,135 @@ pub(crate) struct NamesCommitProposal {
     pub commitment: [u8; 32],
 }
 
+/// Records a user-approved registration intent before a denomination split.
+/// The intent is durable, so sync can reserve the resulting exact one-ZEC
+/// note immediately after the self-transfer confirms.
+pub(crate) fn prepare_registration_draft(
+    db_path: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+    name: &str,
+    payment_address: &str,
+    seed: SecretVec<u8>,
+) -> Result<(), String> {
+    let context = coppice::lifecycle_context(db_path, network)?;
+    let canonical_name = name.trim().to_ascii_lowercase();
+    if canonical_name.is_empty() || canonical_name.contains('.') {
+        return Err("enter the name label only; .zec is added by the wallet".to_string());
+    }
+    if coppice::registration(db_path, account_uuid, &canonical_name)?.is_some() {
+        return Err("this wallet account already has a registration workflow for that name".into());
+    }
+    let record = PaymentRecord::new(context.payment_network, payment_address)
+        .map_err(|error| format!("invalid Names payment record: {error:?}"))?
+        .encode();
+    let account_id = parse_account_uuid(account_uuid)?;
+    let db = open_wallet_db(db_path, network)?;
+    let account = db
+        .get_account(account_id)
+        .map_err(|error| format!("read Names account: {error}"))?
+        .ok_or_else(|| "Names account not found".to_string())?;
+    let zip32_index = account
+        .source()
+        .key_derivation()
+        .ok_or_else(|| "Names registration requires a software-derived account".to_string())?
+        .account_index();
+    let usk = UnifiedSpendingKey::from_seed(&network, seed.expose_secret(), zip32_index)
+        .map_err(|error| format!("derive Names spending key: {error:?}"))?;
+    let ask = SpendAuthorizingKey::from(usk.orchard());
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let intent = RegistrationIntent {
+        name: canonical_name.clone(),
+        owner_pk: spend_auth_owner_key_bytes(&ask),
+        record: record.clone(),
+        secret: registration_secret(seed.expose_secret(), account_uuid, &canonical_name, nonce),
+    };
+    drop(seed);
+    let commitment = prepare_commit(&intent)
+        .map_err(|error| format!("prepare Names COMMIT: {error:#}"))?
+        .commitment();
+    coppice::store_registration(
+        db_path,
+        StoredRegistration {
+            account_uuid: account_uuid.to_string(),
+            name: canonical_name,
+            record,
+            nonce,
+            commitment,
+            send_flow_id: None,
+            bond_txid: None,
+            bond_output_index: None,
+            phase: "awaiting_bond".to_string(),
+            commit_txid: None,
+            reveal_txid: None,
+        },
+    )?;
+    reserve_pending_bonds(db_path, network)
+}
+
+/// Reserves exact one-ZEC notes for durable user-approved registration drafts.
+/// It runs after wallet sync, so a self-transfer cannot be raced by an
+/// ordinary send between confirmation and the next Names screen visit.
+pub(crate) fn reserve_pending_bonds(db_path: &str, network: WalletNetwork) -> Result<(), String> {
+    let context = coppice::lifecycle_context(db_path, network)?;
+    let pending = coppice::registrations(db_path)?;
+    let mut db = open_wallet_db(db_path, network)?;
+    let target_height = db
+        .get_target_and_anchor_heights(std::num::NonZeroU32::MIN)
+        .map_err(|error| format!("read Names bond target height: {error}"))?
+        .ok_or_else(|| "wallet has no synchronized target height".to_string())?
+        .0;
+    for mut registration in pending
+        .into_iter()
+        .filter(|registration| registration.phase == "awaiting_bond")
+    {
+        let account_id = parse_account_uuid(&registration.account_uuid)?;
+        let candidates = db
+            .get_unspent_ironwood_notes_at_historical_height(
+                account_id,
+                BlockHeight::from_u32(u32::from(target_height).saturating_sub(1)),
+            )
+            .map_err(|error| format!("read pending Names bond candidates: {error}"))?;
+        let mut selected = None;
+        for candidate in candidates {
+            let spendable = db
+                .get_spendable_note(
+                    candidate.txid(),
+                    ShieldedPool::Ironwood,
+                    u32::from(candidate.output_index()),
+                    TargetHeight::from(target_height),
+                    LockFilter::Policy(&LockedInputPolicy::Exclude),
+                )
+                .map_err(|error| format!("classify pending Names bond: {error}"))?;
+            if spendable
+                .is_some_and(|note| note.note().value().into_u64() == REQUIRED_BOND_ZATOSHIS)
+            {
+                selected = Some(candidate);
+                break;
+            }
+        }
+        let Some(note) = selected else { continue };
+        let output = OutputRef::new(
+            *note.txid(),
+            PoolType::Shielded(ShieldedPool::Ironwood),
+            u32::from(note.output_index()),
+        );
+        let expiry = BlockHeight::from_u32(
+            u32::from(target_height)
+                .saturating_add(context.params.commit_ttl_blocks)
+                .saturating_add(2),
+        );
+        db.lock_outputs(&[output], LockOwner::new(registration.commitment), expiry)
+            .map_err(|error| format!("reserve prepared Names bond: {error:?}"))?;
+        registration.bond_txid = Some((*note.txid()).into());
+        registration.bond_output_index = Some(u32::from(note.output_index()));
+        registration.phase = "bond_reserved".to_string();
+        coppice::replace_registration(db_path, registration)?;
+    }
+    Ok(())
+}
+
 fn registration_secret(seed: &[u8], account_uuid: &str, name: &str, nonce: [u8; 32]) -> [u8; 32] {
     let mut state = blake2b_simd::Params::new()
         .hash_length(32)
@@ -161,14 +290,10 @@ pub(crate) fn begin_registration(
             context.params.minimum_bond_zatoshis
         ));
     }
-    let record = PaymentRecord::new(context.payment_network, payment_address)
-        .map_err(|error| format!("invalid Names payment record: {error:?}"))?
-        .encode();
     let canonical_name = name.trim().to_ascii_lowercase();
-    let canonical_name = canonical_name
-        .strip_suffix(".zec")
-        .unwrap_or(&canonical_name)
-        .to_string();
+    if canonical_name.is_empty() || canonical_name.contains('.') {
+        return Err("enter the name label only; .zec is added by the wallet".to_string());
+    }
 
     let account_id = parse_account_uuid(account_uuid)?;
     let mut db = open_wallet_db(db_path, network)?;
@@ -184,12 +309,33 @@ pub(crate) fn begin_registration(
     let usk = UnifiedSpendingKey::from_seed(&network, seed.expose_secret(), zip32_index)
         .map_err(|error| format!("derive Names spending key: {error:?}"))?;
     let ask = SpendAuthorizingKey::from(usk.orchard());
-    let mut nonce = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let existing = coppice::registration(db_path, account_uuid, &canonical_name)?;
+    if let Some(registration) = &existing {
+        if registration.phase != "awaiting_bond" && registration.phase != "bond_reserved" {
+            return Err("this Names registration is already in progress or complete".to_string());
+        }
+    }
+    let record = match &existing {
+        Some(registration) => registration.record.clone(),
+        None => PaymentRecord::new(context.payment_network, payment_address)
+            .map_err(|error| format!("invalid Names payment record: {error:?}"))?
+            .encode(),
+    };
+    let nonce = existing
+        .as_ref()
+        .map(|registration| registration.nonce)
+        .unwrap_or_else(|| {
+            let mut nonce = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut nonce);
+            nonce
+        });
     let intent = RegistrationIntent {
         name: canonical_name.clone(),
         owner_pk: spend_auth_owner_key_bytes(&ask),
-        record: record.clone(),
+        record: existing
+            .as_ref()
+            .map(|registration| registration.record.clone())
+            .unwrap_or_else(|| record.clone()),
         secret: registration_secret(seed.expose_secret(), account_uuid, &canonical_name, nonce),
     };
     drop(seed);
@@ -210,10 +356,7 @@ pub(crate) fn begin_registration(
         .map_err(|error| format!("read Names bond candidates: {error}"))?;
     let mut exact = None;
     for candidate in candidates {
-        if candidate.note().value().inner() != REQUIRED_BOND_ZATOSHIS {
-            continue;
-        }
-        exact = db
+        let spendable = db
             .get_spendable_note(
                 candidate.txid(),
                 ShieldedPool::Ironwood,
@@ -222,14 +365,38 @@ pub(crate) fn begin_registration(
                 LockFilter::Policy(&LockedInputPolicy::Exclude),
             )
             .map_err(|error| format!("classify exact Names bond: {error}"))?;
-        if exact.is_some() {
+        if spendable.is_some_and(|note| note.note().value().into_u64() == REQUIRED_BOND_ZATOSHIS) {
+            exact = Some(candidate);
             break;
         }
     }
-    let exact = exact.ok_or_else(|| {
-        "Names requires an exact, confirmed one-ZEC Ironwood note; prepare that note first"
-            .to_string()
-    })?;
+    let exact =
+        match (existing, exact) {
+            (Some(registration), _) if registration.phase == "bond_reserved" => {
+                let txid = registration.bond_txid.ok_or_else(|| {
+                    "reserved Names bond is missing its transaction reference".to_string()
+                })?;
+                let output_index = registration.bond_output_index.ok_or_else(|| {
+                    "reserved Names bond is missing its output reference".to_string()
+                })?;
+                db.get_unspent_ironwood_notes_at_historical_height(
+                    account_id,
+                    BlockHeight::from_u32(historical_height),
+                )
+                .map_err(|error| format!("read reserved Names bond: {error}"))?
+                .into_iter()
+                .find(|note| {
+                    <[u8; 32]>::from(*note.txid()) == txid
+                        && u32::from(note.output_index()) == output_index
+                })
+                .ok_or_else(|| "reserved Names bond is no longer unspent".to_string())?
+            }
+            (_, Some(exact)) => exact,
+            _ => return Err(
+                "Names requires an exact, confirmed one-ZEC Ironwood note; prepare that note first"
+                    .to_string(),
+            ),
+        };
     let bond_ref = OutputRef::new(
         *exact.txid(),
         PoolType::Shielded(ShieldedPool::Ironwood),
@@ -275,22 +442,26 @@ pub(crate) fn begin_registration(
             return Err(error);
         }
     };
-    if let Err(error) = coppice::store_registration(
-        db_path,
-        StoredRegistration {
-            account_uuid: account_uuid.to_string(),
-            name: canonical_name,
-            record,
-            nonce,
-            commitment: prepared.commitment(),
-            send_flow_id: Some(send_flow_id.to_string()),
-            bond_txid: Some((*exact.txid()).into()),
-            bond_output_index: Some(u32::from(exact.output_index())),
-            phase: "commit_proposed".to_string(),
-            commit_txid: None,
-            reveal_txid: None,
-        },
-    ) {
+    let updated_registration = StoredRegistration {
+        account_uuid: account_uuid.to_string(),
+        name: canonical_name,
+        record: intent.record.clone(),
+        nonce,
+        commitment: prepared.commitment(),
+        send_flow_id: Some(send_flow_id.to_string()),
+        bond_txid: Some((*exact.txid()).into()),
+        bond_output_index: Some(u32::from(exact.output_index())),
+        phase: "commit_proposed".to_string(),
+        commit_txid: None,
+        reveal_txid: None,
+    };
+    let persisted =
+        if coppice::registration(db_path, account_uuid, &updated_registration.name)?.is_some() {
+            coppice::replace_registration(db_path, updated_registration)
+        } else {
+            coppice::store_registration(db_path, updated_registration)
+        };
+    if let Err(error) = persisted {
         let _ = sync::discard_proposal(proposal.proposal_id, send_flow_id);
         let mut db = open_wallet_db(db_path, network)?;
         let _ = db.unlock_output(&bond_ref, lock_owner);
