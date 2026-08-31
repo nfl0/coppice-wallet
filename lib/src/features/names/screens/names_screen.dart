@@ -848,9 +848,8 @@ class _RegistrationCard extends StatelessWidget {
         const SizedBox(height: AppSpacing.xxs),
         Text(
           'Registration uses an exact 1 ZEC refundable bond. If the wallet '
-          'does not have that denomination, it will prepare one first. For '
-          'software accounts, approving the COMMIT also enables the wallet to '
-          'broadcast REVEAL automatically at the first valid block.',
+          'does not have that denomination, it will prepare one first. After '
+          'COMMIT is accepted, return at the scheduled block to approve REVEAL.',
           style: AppTypography.bodySmall.copyWith(color: colors.text.secondary),
         ),
         const SizedBox(height: AppSpacing.sm),
@@ -1031,8 +1030,8 @@ class _ManagedNamesCard extends StatelessWidget {
                                     item.nextRevealHeight != null)
                                   Text(
                                     item.revealReady
-                                        ? 'Automatic REVEAL is being prepared for the next block.'
-                                        : 'Automatic REVEAL in ${item.revealBlocksUntil} blocks '
+                                        ? 'REVEAL is ready for the next block.'
+                                        : 'REVEAL in ${item.revealBlocksUntil} blocks '
                                               '(height ${item.nextRevealHeight}).',
                                     style: AppTypography.bodySmall.copyWith(
                                       color: item.revealReady
@@ -1046,6 +1045,7 @@ class _ManagedNamesCard extends StatelessWidget {
                           if (item.phase == 'commit_accepted' &&
                               item.revealReady)
                             AppButton(
+                              key: ValueKey('names_reveal_button_${item.name}'),
                               variant: AppButtonVariant.secondary,
                               size: AppButtonSize.medium,
                               onPressed: inFlightName == null
@@ -1130,7 +1130,7 @@ String _managedPhaseLabel(String phase) => switch (phase) {
   'bond_reserved' => 'Exact 1 ZEC bond reserved — continue registration',
   'commit_proposed' => 'COMMIT proposal awaiting wallet confirmation',
   'commit_broadcast' => 'COMMIT broadcast — awaiting canonical Names replay',
-  'commit_accepted' => 'COMMIT accepted — automatic REVEAL pending',
+  'commit_accepted' => 'COMMIT accepted — REVEAL when scheduled',
   'commit_expired' => 'COMMIT expired before REVEAL',
   'reveal_broadcast' => 'REVEAL awaiting confirmation',
   'active' => 'Active',
