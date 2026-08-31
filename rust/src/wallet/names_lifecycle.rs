@@ -185,6 +185,7 @@ pub(crate) fn prepare_registration_draft(
             send_flow_id: None,
             bond_txid: None,
             bond_output_index: None,
+            commit_height: None,
             phase: "awaiting_bond".to_string(),
             commit_txid: None,
             reveal_txid: None,
@@ -456,6 +457,7 @@ pub(crate) fn begin_registration(
         send_flow_id: Some(send_flow_id.to_string()),
         bond_txid: Some((*exact.txid()).into()),
         bond_output_index: Some(u32::from(exact.output_index())),
+        commit_height: None,
         phase: "commit_proposed".to_string(),
         commit_txid: None,
         reveal_txid: None,
@@ -503,6 +505,55 @@ pub(crate) fn cancel_registration_proposal(
     db.unlock_output(&output, LockOwner::new(registration.commitment))
         .map(|_| ())
         .map_err(|error| format!("release cancelled Names bond: {error:?}"))
+}
+
+/// Discards a locally abandoned pre-REVEAL workflow. This never changes
+/// canonical Names history; it only lets the wallet start a new COMMIT after
+/// an expired carrier or an explicitly abandoned proposal.
+pub(crate) fn discard_registration_workflow(
+    db_path: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+    name: &str,
+) -> Result<(), String> {
+    let canonical_name = name.trim().to_ascii_lowercase();
+    let Some(registration) = coppice::registration(db_path, account_uuid, &canonical_name)? else {
+        return Ok(());
+    };
+    if !matches!(
+        registration.phase.as_str(),
+        "awaiting_bond"
+            | "bond_reserved"
+            | "commit_proposed"
+            | "commit_broadcast"
+            | "commit_expired"
+    ) {
+        return Err("only an uncompleted Names registration workflow can be discarded".to_string());
+    }
+    let registration = coppice::take_registration_workflow(db_path, account_uuid, &canonical_name)?
+        .ok_or_else(|| "Names registration workflow disappeared".to_string())?;
+    // A carrier may have been broadcast even if a stale UI record still says
+    // `commit_proposed`. Never force-unlock its bond on that untrusted local
+    // phase alone: the wallet's normal height-bounded lock will expire, while
+    // canonical Names replay remains authoritative for acceptance/expiry.
+    let may_force_unlock = matches!(
+        registration.phase.as_str(),
+        "awaiting_bond" | "bond_reserved" | "commit_expired"
+    );
+    if may_force_unlock {
+        if let (Some(txid), Some(output_index)) =
+            (registration.bond_txid, registration.bond_output_index)
+        {
+            let output = OutputRef::new(
+                TxId::from_bytes(txid),
+                PoolType::Shielded(ShieldedPool::Ironwood),
+                output_index,
+            );
+            let mut db = open_wallet_db(db_path, network)?;
+            let _ = db.unlock_output(&output, LockOwner::new(registration.commitment));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) struct NamesRevealTransaction {

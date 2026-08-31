@@ -257,6 +257,10 @@ pub(crate) struct StoredRegistration {
     pub bond_txid: Option<[u8; 32]>,
     #[serde(default)]
     pub bond_output_index: Option<u32>,
+    /// Canonical height at which this workflow's COMMIT was observed as
+    /// accepted. It is local UI/custody metadata, never consensus evidence.
+    #[serde(default)]
+    pub commit_height: Option<u32>,
     pub phase: String,
     pub commit_txid: Option<[u8; 32]>,
     pub reveal_txid: Option<[u8; 32]>,
@@ -997,13 +1001,16 @@ pub(crate) fn managed_registrations(
                     continue;
                 }
             }
-            if host
-                .runtime
-                .applications()
-                .pending(registration.commitment)
-                .is_some()
-            {
+            if let Some(commit) = host.runtime.applications().pending(registration.commitment) {
                 registration.phase = "commit_accepted".to_string();
+                registration.commit_height = Some(commit.position.height);
+            } else if registration.phase == "commit_accepted"
+                && registration.commit_height.is_some_and(|height| {
+                    height.saturating_add(host.params().commit_ttl_blocks)
+                        <= host.runtime.tip().height
+                })
+            {
+                registration.phase = "commit_expired".to_string();
             }
         }
     }
@@ -1031,6 +1038,25 @@ pub(crate) fn take_cancelled_registration(
     Ok(Some(registration))
 }
 
+pub(crate) fn take_registration_workflow(
+    db_path: &str,
+    account_uuid: &str,
+    name: &str,
+) -> Result<Option<StoredRegistration>, String> {
+    let path = sidecar_path(db_path);
+    let Some(mut stored) = read_stored(&path)? else {
+        return Ok(None);
+    };
+    let Some(index) = stored.registrations.iter().position(|registration| {
+        registration.account_uuid == account_uuid && registration.name == name
+    }) else {
+        return Ok(None);
+    };
+    let registration = stored.registrations.remove(index);
+    write_stored(&path, &stored)?;
+    Ok(Some(registration))
+}
+
 pub(crate) fn record_reveal_broadcast(
     db_path: &str,
     account_uuid: &str,
@@ -1047,6 +1073,28 @@ pub(crate) fn record_reveal_broadcast(
     registration.phase = "reveal_broadcast".to_string();
     registration.reveal_txid = Some(txid);
     registration.send_flow_id = None;
+    write_stored(&path, &stored)
+}
+
+/// Records that the ordinary wallet send path broadcast a Names COMMIT.
+/// This is workflow metadata only; canonical replay remains the authority for
+/// whether the COMMIT was actually accepted.
+pub(crate) fn record_commit_broadcast(
+    db_path: &str,
+    send_flow_id: &str,
+    txid: [u8; 32],
+) -> Result<(), String> {
+    let path = sidecar_path(db_path);
+    let mut stored = read_stored(&path)?.ok_or_else(|| "Names is not configured".to_string())?;
+    let Some(registration) = stored
+        .registrations
+        .iter_mut()
+        .find(|registration| registration.send_flow_id.as_deref() == Some(send_flow_id))
+    else {
+        return Ok(());
+    };
+    registration.phase = "commit_broadcast".to_string();
+    registration.commit_txid = Some(txid);
     write_stored(&path, &stored)
 }
 
@@ -1231,6 +1279,19 @@ fn persist_host_preserving_workflows(path: &Path, host: &NamesWalletHost) -> Res
             return Err("Names configuration changed while persisting replay state".to_string());
         }
         checkpoint.registrations = current.registrations;
+        for registration in &mut checkpoint.registrations {
+            if let Some(commit) = host.runtime.applications().pending(registration.commitment) {
+                registration.phase = "commit_accepted".to_string();
+                registration.commit_height = Some(commit.position.height);
+            } else if registration.phase == "commit_accepted"
+                && registration.commit_height.is_some_and(|height| {
+                    height.saturating_add(host.params().commit_ttl_blocks)
+                        <= host.runtime.tip().height
+                })
+            {
+                registration.phase = "commit_expired".to_string();
+            }
+        }
     }
     write_stored(path, &checkpoint)
 }

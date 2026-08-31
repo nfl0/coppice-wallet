@@ -1093,6 +1093,20 @@ pub fn execute_proposal(
             spend_params_path.as_deref(),
             output_params_path.as_deref(),
         ))?;
+        if r.status == "broadcasted" {
+            if let Some(txid) = r
+                .txids
+                .split(',')
+                .next()
+                .and_then(|txid| hex::decode(txid.trim()).ok())
+                .and_then(|bytes| bytes.try_into().ok())
+            {
+                // A non-Names send has no matching workflow and is a safe
+                // no-op. The replay host remains the acceptance authority.
+                let _ =
+                    crate::wallet::coppice::record_commit_broadcast(&db_path, &send_flow_id, txid);
+            }
+        }
         Ok(ExecuteProposalResult {
             txids: r.txids,
             status: r.status,
@@ -1133,6 +1147,18 @@ pub fn execute_proposal_with_macos_stored_mnemonic(
             spend_params_path.as_deref(),
             output_params_path.as_deref(),
         ))?;
+        if r.status == "broadcasted" {
+            if let Some(txid) = r
+                .txids
+                .split(',')
+                .next()
+                .and_then(|txid| hex::decode(txid.trim()).ok())
+                .and_then(|bytes| bytes.try_into().ok())
+            {
+                let _ =
+                    crate::wallet::coppice::record_commit_broadcast(&db_path, &send_flow_id, txid);
+            }
+        }
         Ok(ExecuteProposalResult {
             txids: r.txids,
             status: r.status,

@@ -94,6 +94,20 @@ Future<ApiNamesRegistrationDraft> prepareNamesV1RegistrationDraft({
   mnemonicBytes: mnemonicBytes,
 );
 
+/// Discards an uncompleted wallet-local workflow after the user explicitly
+/// abandons it. Canonical COMMIT/REVEAL state is never altered here.
+void discardNamesV1RegistrationWorkflow({
+  required String dbPath,
+  required String network,
+  required String accountUuid,
+  required String name,
+}) => RustLib.instance.api.crateApiNamesDiscardNamesV1RegistrationWorkflow(
+  dbPath: dbPath,
+  network: network,
+  accountUuid: accountUuid,
+  name: name,
+);
+
 /// Reserve the exact one-ZEC registration bond and create a COMMIT carrier
 /// proposal. This intentionally does not broadcast: the established wallet
 /// review and credential flow remains the sole transaction-execution path.
@@ -182,11 +196,20 @@ class ApiManagedName {
   final String phase;
   final Uint8List commitment;
 
+  /// Present only after canonical replay has authenticated this exact
+  /// COMMIT. These are workflow display values, not independent evidence.
+  final BigInt? commitHeight;
+  final BigInt? commitExpiryHeight;
+  final BigInt? commitBlocksRemaining;
+
   const ApiManagedName({
     required this.name,
     this.paymentAddress,
     required this.phase,
     required this.commitment,
+    this.commitHeight,
+    this.commitExpiryHeight,
+    this.commitBlocksRemaining,
   });
 
   @override
@@ -194,7 +217,10 @@ class ApiManagedName {
       name.hashCode ^
       paymentAddress.hashCode ^
       phase.hashCode ^
-      commitment.hashCode;
+      commitment.hashCode ^
+      commitHeight.hashCode ^
+      commitExpiryHeight.hashCode ^
+      commitBlocksRemaining.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -204,7 +230,10 @@ class ApiManagedName {
           name == other.name &&
           paymentAddress == other.paymentAddress &&
           phase == other.phase &&
-          commitment == other.commitment;
+          commitment == other.commitment &&
+          commitHeight == other.commitHeight &&
+          commitExpiryHeight == other.commitExpiryHeight &&
+          commitBlocksRemaining == other.commitBlocksRemaining;
 }
 
 /// Wallet-owned denomination readiness for starting a registration.

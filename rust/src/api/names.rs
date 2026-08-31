@@ -59,6 +59,11 @@ pub struct ApiManagedName {
     pub payment_address: Option<String>,
     pub phase: String,
     pub commitment: Vec<u8>,
+    /// Present only after canonical replay has authenticated this exact
+    /// COMMIT. These are workflow display values, not independent evidence.
+    pub commit_height: Option<u64>,
+    pub commit_expiry_height: Option<u64>,
+    pub commit_blocks_remaining: Option<u64>,
 }
 
 impl From<coppice::NamesWalletStatus> for ApiNamesWalletStatus {
@@ -178,7 +183,10 @@ pub fn get_managed_names_v1(
 ) -> Result<Vec<ApiManagedName>, String> {
     let network = keys::parse_network(&network)?;
     keys::ensure_db_migrated_once(&db_path, network)?;
-    let payment_network = coppice::lifecycle_context(&db_path, network)?.payment_network;
+    let context = coppice::lifecycle_context(&db_path, network)?;
+    let current_tip = context.tip_height;
+    let commit_ttl_blocks = context.params.commit_ttl_blocks;
+    let payment_network = context.payment_network;
     coppice::managed_registrations(&db_path, network, &account_uuid)?
         .into_iter()
         .map(|registration| {
@@ -186,11 +194,19 @@ pub fn get_managed_names_v1(
                 coppice_names::v1::PaymentRecord::decode(&registration.record, payment_network)
                     .ok()
                     .map(|record| record.address().to_string());
+            let commit_expiry_height = registration
+                .commit_height
+                .map(|height| height.saturating_add(commit_ttl_blocks));
+            let commit_blocks_remaining =
+                commit_expiry_height.map(|expiry| expiry.saturating_sub(current_tip));
             Ok(ApiManagedName {
                 name: registration.name,
                 payment_address,
                 phase: registration.phase,
                 commitment: registration.commitment.to_vec(),
+                commit_height: registration.commit_height.map(u64::from),
+                commit_expiry_height: commit_expiry_height.map(u64::from),
+                commit_blocks_remaining: commit_blocks_remaining.map(u64::from),
             })
         })
         .collect()
@@ -226,6 +242,24 @@ pub fn prepare_names_v1_registration_draft(
     Ok(ApiNamesRegistrationDraft {
         phase: registration.phase,
     })
+}
+
+/// Discards an uncompleted wallet-local workflow after the user explicitly
+/// abandons it. Canonical COMMIT/REVEAL state is never altered here.
+#[frb(sync)]
+pub fn discard_names_v1_registration_workflow(
+    db_path: String,
+    network: String,
+    account_uuid: String,
+    name: String,
+) -> Result<(), String> {
+    let network = keys::parse_network(&network)?;
+    crate::wallet::names_lifecycle::discard_registration_workflow(
+        &db_path,
+        network,
+        &account_uuid,
+        &name,
+    )
 }
 
 /// Reserve the exact one-ZEC registration bond and create a COMMIT carrier

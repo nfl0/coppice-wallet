@@ -180,6 +180,43 @@ class _NamesViewState extends ConsumerState<NamesView> {
     await _registerName();
   }
 
+  Future<void> _discardRegistration(rust_names.ApiManagedName item) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Start ${item.name}.zec over?'),
+        content: const Text(
+          'This discards the local unfinished workflow. It does not alter any '
+          'canonical Names history. A broadcast COMMIT keeps its normal '
+          'height-bounded bond lock; it is never force-unlocked here.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Start over'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    setState(() {
+      _managedNameInFlight = item.name;
+      _managedNameError = null;
+    });
+    final error = await ref
+        .read(managedNamesProvider.notifier)
+        .discardUncompletedRegistration(item.name);
+    if (!mounted) return;
+    setState(() {
+      _managedNameInFlight = null;
+      _managedNameError = error;
+    });
+  }
+
   Future<void> _manageName(
     rust_names.ApiManagedName item,
     String action,
@@ -247,9 +284,21 @@ class _NamesViewState extends ConsumerState<NamesView> {
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(syncProvider, (_, next) {
-      if (!next.hasValue) return;
+    ref.listen<AsyncValue<SyncState>>(syncProvider, (previous, next) {
+      final sync = next.asData?.value;
+      if (sync == null) return;
       ref.read(namesRegistrationProvider.notifier).refreshDraftPhase();
+      // Names replay is persisted by the Rust sync engine before it reports
+      // successful completion. Explicitly refresh these independent sidecar
+      // reads on that boundary: watching progress alone can otherwise leave a
+      // tab that was already open showing a pre-COMMIT tip until restart.
+      final previousCompletedAt = previous?.asData?.value.lastSyncCompletedAt;
+      if (sync.isSyncComplete &&
+          sync.lastSyncCompletedAt != null &&
+          sync.lastSyncCompletedAt != previousCompletedAt) {
+        ref.invalidate(namesStatusProvider);
+        ref.invalidate(managedNamesProvider);
+      }
     });
     final colors = context.colors;
     final statusAsync = ref.watch(namesStatusProvider);
@@ -328,6 +377,7 @@ class _NamesViewState extends ConsumerState<NamesView> {
                   error: _managedNameError,
                   onReveal: _revealName,
                   onResumeRegistration: _resumeRegistration,
+                  onDiscardRegistration: _discardRegistration,
                   onManage: _manageName,
                   onRefresh: () =>
                       ref.read(managedNamesProvider.notifier).refresh(),
@@ -889,6 +939,7 @@ class _ManagedNamesCard extends StatelessWidget {
     required this.error,
     required this.onReveal,
     required this.onResumeRegistration,
+    required this.onDiscardRegistration,
     required this.onManage,
     required this.onRefresh,
   });
@@ -898,6 +949,7 @@ class _ManagedNamesCard extends StatelessWidget {
   final String? error;
   final ValueChanged<String> onReveal;
   final ValueChanged<rust_names.ApiManagedName> onResumeRegistration;
+  final ValueChanged<rust_names.ApiManagedName> onDiscardRegistration;
   final void Function(rust_names.ApiManagedName, String) onManage;
   final VoidCallback onRefresh;
 
@@ -964,6 +1016,15 @@ class _ManagedNamesCard extends StatelessWidget {
                                     color: colors.text.secondary,
                                   ),
                                 ),
+                                if (item.phase == 'commit_accepted' &&
+                                    item.commitBlocksRemaining != null)
+                                  Text(
+                                    '${item.commitBlocksRemaining} blocks remaining before COMMIT expiry '
+                                    '(height ${item.commitExpiryHeight})',
+                                    style: AppTypography.bodySmall.copyWith(
+                                      color: colors.text.warning,
+                                    ),
+                                  ),
                               ],
                             ),
                           ),
@@ -991,6 +1052,17 @@ class _ManagedNamesCard extends StatelessWidget {
                                     ? 'Continue'
                                     : 'Prepare bond',
                               ),
+                            ),
+                          if (item.phase == 'commit_proposed' ||
+                              item.phase == 'commit_broadcast' ||
+                              item.phase == 'commit_expired')
+                            AppButton(
+                              variant: AppButtonVariant.secondary,
+                              size: AppButtonSize.medium,
+                              onPressed: inFlightName == null
+                                  ? () => onDiscardRegistration(item)
+                                  : null,
+                              child: const Text('Start over'),
                             ),
                           if (item.phase == 'active')
                             PopupMenuButton<String>(
@@ -1040,8 +1112,10 @@ class _ManagedNamesCard extends StatelessWidget {
 String _managedPhaseLabel(String phase) => switch (phase) {
   'awaiting_bond' => 'Awaiting exact 1 ZEC bond note',
   'bond_reserved' => 'Exact 1 ZEC bond reserved — continue registration',
-  'commit_proposed' => 'COMMIT awaiting broadcast or confirmation',
+  'commit_proposed' => 'COMMIT proposal awaiting wallet confirmation',
+  'commit_broadcast' => 'COMMIT broadcast — awaiting canonical Names replay',
   'commit_accepted' => 'COMMIT accepted — REVEAL when scheduled',
+  'commit_expired' => 'COMMIT expired before REVEAL',
   'reveal_broadcast' => 'REVEAL awaiting confirmation',
   'active' => 'Active',
   'released' => 'Released',

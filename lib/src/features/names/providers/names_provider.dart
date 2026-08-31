@@ -372,6 +372,25 @@ class ManagedNamesNotifier
     }
   }
 
+  Future<String?> discardUncompletedRegistration(String name) async {
+    final accountUuid = ref.read(accountProvider).value?.activeAccountUuid;
+    if (accountUuid == null) return 'Unlock your wallet first.';
+    try {
+      final endpoint = ref.read(rpcEndpointProvider);
+      rust_names.discardNamesV1RegistrationWorkflow(
+        dbPath: await getWalletDbPath(),
+        network: endpoint.networkName,
+        accountUuid: accountUuid,
+        name: name,
+      );
+      if (ref.mounted) ref.invalidateSelf();
+      return null;
+    } catch (error) {
+      log('Names: discard registration failed: $error');
+      return _friendlyRegistrationError(error);
+    }
+  }
+
   Future<String?> manage(
     String name,
     String action, {
