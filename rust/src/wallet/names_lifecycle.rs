@@ -284,9 +284,14 @@ pub(crate) fn begin_registration(
     seed: SecretVec<u8>,
 ) -> Result<NamesCommitProposal, String> {
     let context = coppice::lifecycle_context(db_path, network)?;
-    if context.params.minimum_bond_zatoshis != REQUIRED_BOND_ZATOSHIS {
+    // The application wallet policy deliberately prepares one exact ZEC,
+    // while the proof parameter is a *minimum*. A deployment with a smaller
+    // minimum (including the one-zatoshi regtest qualification profile)
+    // accepts that one-ZEC state note; only a deployment requiring more than
+    // the wallet policy can reject this flow.
+    if context.params.minimum_bond_zatoshis > REQUIRED_BOND_ZATOSHIS {
         return Err(format!(
-            "wallet supports an exact one-ZEC Names bond, but this deployment requires {} zatoshi",
+            "wallet supports an exact one-ZEC Names bond, but this deployment requires at least {} zatoshi",
             context.params.minimum_bond_zatoshis
         ));
     }
