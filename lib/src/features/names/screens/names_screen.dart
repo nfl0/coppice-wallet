@@ -192,7 +192,16 @@ class _NamesViewState extends ConsumerState<NamesView> {
         return;
       }
       try {
-        await context.push('/send/review', extra: review);
+        final reviewRoute = context.push('/send/review', extra: review);
+        // The generic send flow completes with `go('/names')`, which replaces
+        // the route instead of popping this pushed route. Do not keep every
+        // managed-name action disabled while waiting on a Future that may
+        // therefore never complete. The review screen owns the proposal as
+        // soon as push succeeds.
+        if (mounted) {
+          setState(() => _managedNameInFlight = null);
+        }
+        await reviewRoute;
       } catch (routeError) {
         // If route construction fails before SendReviewScreen can own the
         // capability, release it through the same idempotent generic path.
@@ -1142,6 +1151,9 @@ class _ManagedNamesCard extends StatelessWidget {
                             if (item.phase == 'awaiting_bond' ||
                                 item.phase == 'bond_reserved')
                               AppButton(
+                                key: ValueKey(
+                                  'names_resume_registration_${item.name}',
+                                ),
                                 variant: AppButtonVariant.secondary,
                                 size: AppButtonSize.medium,
                                 onPressed: inFlightName == null

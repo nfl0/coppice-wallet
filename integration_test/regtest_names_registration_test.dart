@@ -98,11 +98,12 @@ void main() {
           () => textForKey(tester, registrationButton) != null,
           description: 'registration action for $name',
         );
-        final needsBond =
-            textForKey(tester, registrationButton) == 'Prepare 1 ZEC note';
         await tapAppButton(tester, registrationButton);
-        if (needsBond) {
-          await _confirmSend(tester, description: '1 ZEC bond preparation');
+        final preparedBond = await _confirmSend(
+          tester,
+          description: 'Names registration first transaction',
+        );
+        if (preparedBond) {
           final bondHeight = await _mine(3);
           await _syncToHeight(tester, bondHeight);
           await tapAppWidget(tester, const ValueKey('sidebar_names_button'));
@@ -112,9 +113,12 @@ void main() {
             description: 'confirmed exact bond to become reserved',
             timeout: const Duration(minutes: 3),
           );
-          await tapAppButton(tester, registrationButton);
+          await tapAppButton(
+            tester,
+            ValueKey('names_resume_registration_$name'),
+          );
+          await _confirmSend(tester, description: 'Names COMMIT for $name');
         }
-        await _confirmSend(tester, description: 'Names COMMIT for $name');
 
         // Mine one block at a time and make the wallet finish applying that
         // exact tip before checking the one-block REVEAL window.
@@ -264,7 +268,10 @@ Future<void> _ensureNamesReady(WidgetTester tester) async {
   );
 }
 
-Future<void> _confirmSend(
+/// Confirms the current reviewed send and returns whether it used the ordinary
+/// send proposal screen (the 1 ZEC bond preparation path) rather than a direct
+/// Names capability review.
+Future<bool> _confirmSend(
   WidgetTester tester, {
   required String description,
 }) async {
@@ -276,7 +283,10 @@ Future<void> _confirmSend(
     description: '$description review',
     timeout: const Duration(minutes: 2),
   );
-  if (tester.any(find.byKey(const ValueKey('send_review_button')))) {
+  final usedOrdinaryProposal = tester.any(
+    find.byKey(const ValueKey('send_review_button')),
+  );
+  if (usedOrdinaryProposal) {
     await tapAppButton(tester, const ValueKey('send_review_button'));
   }
   await tapAppButton(tester, const ValueKey('send_confirm_button'));
@@ -286,6 +296,7 @@ Future<void> _confirmSend(
     description: '$description transaction broadcast',
     timeout: const Duration(minutes: 4),
   );
+  return usedOrdinaryProposal;
 }
 
 Future<int> _mine(int count) async {
