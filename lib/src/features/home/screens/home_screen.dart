@@ -291,7 +291,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         balancePresentation == IronwoodHomeBalancePresentationMode.ironwoodOnly;
     final totalShieldedBalance = sync.displayShieldedBalance;
     final ironwoodBalance =
-        sync.displayIronwoodBalance + sync.displayIronwoodPendingBalance;
+        sync.displayIronwoodBalance +
+        sync.displayIronwoodPendingBalance +
+        sync.displayIronwoodLockedBalance;
     final displayedShieldedBalance = showsIronwoodOnlyBalance
         ? ironwoodBalance
         : totalShieldedBalance;

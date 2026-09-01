@@ -380,6 +380,7 @@ Future<void> cleanupDesktopRegtestWallet() async {
     dbName,
     '$dbName-shm',
     '$dbName-wal',
+    '$dbName.coppice-names-v1',
     '$dbName.voting',
     '$dbName.voting-journal',
     '$dbName.voting-shm',

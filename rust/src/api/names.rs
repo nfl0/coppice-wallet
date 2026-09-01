@@ -48,6 +48,12 @@ pub struct ApiNamesCommitProposal {
     pub commitment: Vec<u8>,
 }
 
+/// Reviewed REVEAL proposal backed by an atomically consumed Rust capability.
+pub struct ApiNamesRevealProposal {
+    pub proposal_id: u64,
+    pub fee_zatoshi: u64,
+}
+
 /// Durable registration intent state. A draft survives the ordinary wallet
 /// self-transfer used to form an exact bond denomination.
 pub struct ApiNamesRegistrationDraft {
@@ -186,10 +192,13 @@ pub fn get_managed_names_v1(
 ) -> Result<Vec<ApiManagedName>, String> {
     let network = keys::parse_network(&network)?;
     keys::ensure_db_migrated_once(&db_path, network)?;
-    let context = coppice::lifecycle_context(&db_path, network)?;
-    let current_tip = context.tip_height;
-    let commit_ttl_blocks = context.params.commit_ttl_blocks;
-    let payment_network = context.payment_network;
+    // Managed rows include durable wallet-local workflow phases such as
+    // `awaiting_bond` and `bond_reserved`. They must remain readable after a
+    // replay failure has removed the derived host and requested rebootstrap.
+    let metadata = coppice::configured_names_metadata(&db_path, network)?;
+    let current_tip = metadata.tip_height;
+    let commit_ttl_blocks = metadata.params.commit_ttl_blocks;
+    let payment_network = metadata.payment_network;
     coppice::managed_registrations(&db_path, network, &account_uuid)?
         .into_iter()
         .map(|registration| {
@@ -210,7 +219,7 @@ pub fn get_managed_names_v1(
                         coppice_names::v1::schedule::next_anchor_height(
                             name_id,
                             construction_height,
-                            context.params,
+                            metadata.params,
                         )
                     })
             } else {
@@ -314,6 +323,39 @@ pub fn begin_names_v1_registration(
         proposal_id: proposal.proposal_id,
         fee_zatoshi: proposal.fee_zatoshi,
         commitment: proposal.commitment.to_vec(),
+    })
+}
+
+/// Builds and signs a Names REVEAL for the exact scheduled anchor, but does
+/// not broadcast. Execution is later routed through the ordinary proposal
+/// review/confirmation entrypoint.
+pub fn begin_names_v1_reveal(
+    db_path: String,
+    lightwalletd_url: String,
+    network: String,
+    account_uuid: String,
+    send_flow_id: String,
+    name: String,
+    mnemonic_bytes: Vec<u8>,
+) -> Result<ApiNamesRevealProposal, String> {
+    let network = keys::parse_network(&network)?;
+    keys::ensure_db_migrated_once(&db_path, network)?;
+    let mnemonic_bytes = Zeroizing::new(mnemonic_bytes);
+    let seed = keys::mnemonic_bytes_to_seed(mnemonic_bytes.as_slice())?;
+    drop(mnemonic_bytes);
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| format!("tokio: {error}"))?;
+    let proposal = runtime.block_on(crate::wallet::names_lifecycle::begin_reviewed_reveal(
+        &db_path,
+        &lightwalletd_url,
+        network,
+        &account_uuid,
+        &name,
+        &send_flow_id,
+        seed,
+    ))?;
+    Ok(ApiNamesRevealProposal {
+        proposal_id: proposal.proposal_id,
+        fee_zatoshi: proposal.fee_zatoshi,
     })
 }
 

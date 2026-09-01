@@ -653,6 +653,7 @@ void main() {
           displayOrchardLockedBalance: BigInt.from(800_000_000),
           ironwoodBalance: BigInt.zero,
           displayIronwoodBalance: BigInt.from(4_011_000_000),
+          displayIronwoodLockedBalance: BigInt.from(100_000_000),
           spendableBalance: BigInt.zero,
           displaySpendableBalance: BigInt.from(4_011_000_000),
           displaySpendableFreshness:
@@ -669,7 +670,7 @@ void main() {
       find.byKey(const ValueKey('home_desktop_send_button')),
     );
 
-    expect(find.text('40.11'), findsOneWidget);
+    expect(find.text('41.11'), findsOneWidget);
     expect(find.text('10 ZEC still migrating'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('home_desktop_send_button')),

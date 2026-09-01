@@ -80,7 +80,8 @@ use crate::wallet::db::with_wallet_db_write_lock;
 use crate::wallet::network::WalletNetwork;
 
 use super::{
-    consume_stored_proposal, discard_stored_proposal, finish_stored_proposal, open_wallet_db,
+    consume_stored_proposal, discard_names_reveal_capability, discard_stored_proposal,
+    finish_stored_proposal, open_wallet_db, retain_names_reveal_capability_until_expiry,
     retain_stored_proposal_lock_until_expiry, stored_proposal_lock,
 };
 
@@ -742,6 +743,9 @@ pub async fn create_tex_pczts_from_proposal(
 /// safe to call for a proposal that has already been consumed or
 /// never existed.
 pub fn discard_proposal(proposal_id: u64, send_flow_id: &str) -> Result<(), String> {
+    if discard_names_reveal_capability(proposal_id, send_flow_id)? {
+        return Ok(());
+    }
     let wallet = stored_proposal_lock(proposal_id, send_flow_id)
         .ok()
         .map(|lock| (lock.db_path, lock.network));
@@ -765,6 +769,9 @@ pub fn retain_proposal_lock_until_expiry(
     proposal_id: u64,
     send_flow_id: &str,
 ) -> Result<(), String> {
+    if retain_names_reveal_capability_until_expiry(proposal_id, send_flow_id)? {
+        return Ok(());
+    }
     retain_stored_proposal_lock_until_expiry(proposal_id, send_flow_id)
 }
 

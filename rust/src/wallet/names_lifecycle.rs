@@ -30,6 +30,7 @@ use orchard::{
 };
 use rand::RngCore;
 use secrecy::{ExposeSecret, SecretVec};
+use std::sync::{Arc, Mutex};
 use zcash_client_backend::{
     data_api::{
         locking::{LockFilter, OutputLockStore},
@@ -48,6 +49,7 @@ use zcash_protocol::{
 
 use super::{
     coppice::{self, StoredRegistration},
+    db::with_wallet_db_write_lock,
     keys::parse_account_uuid,
     network::WalletNetwork,
     sync::{self, open_wallet_db, open_wallet_db_for_read},
@@ -198,8 +200,19 @@ pub(crate) fn prepare_registration_draft(
 /// Reserves exact one-ZEC notes for durable user-approved registration drafts.
 /// It runs after wallet sync, so a self-transfer cannot be raced by an
 /// ordinary send between confirmation and the next Names screen visit.
+/// Serialized on the wallet write lock: a UI-triggered reservation must queue
+/// behind an in-flight sync batch instead of failing on `database is locked`.
 pub(crate) fn reserve_pending_bonds(db_path: &str, network: WalletNetwork) -> Result<(), String> {
-    let context = coppice::lifecycle_context(db_path, network)?;
+    with_wallet_db_write_lock("names.reserve_pending_bonds", || {
+        reserve_pending_bonds_locked(db_path, network)
+    })
+}
+
+fn reserve_pending_bonds_locked(db_path: &str, network: WalletNetwork) -> Result<(), String> {
+    // Bond reservation is wallet custody state, not derived Names replay.
+    // Keep it progressing when a replay checkpoint has been discarded and
+    // the user is waiting for an exact self-transfer to become spendable.
+    let metadata = coppice::configured_names_metadata(db_path, network)?;
     let pending = coppice::registrations(db_path)?;
     let mut db = open_wallet_db(db_path, network)?;
     let target_height = db
@@ -244,7 +257,7 @@ pub(crate) fn reserve_pending_bonds(db_path: &str, network: WalletNetwork) -> Re
         );
         let expiry = BlockHeight::from_u32(
             u32::from(target_height)
-                .saturating_add(context.params.commit_ttl_blocks)
+                .saturating_add(metadata.params.commit_ttl_blocks)
                 .saturating_add(2),
         );
         db.lock_outputs(&[output], LockOwner::new(registration.commitment), expiry)
@@ -415,8 +428,10 @@ pub(crate) fn begin_registration(
         .map(BlockHeight::from_u32)
         .ok_or_else(|| "Names bond lock expiry overflow".to_string())?;
     let lock_owner = LockOwner::new(prepared.commitment());
-    db.lock_outputs(&[bond_ref], lock_owner, lock_expiry)
-        .map_err(|error| format!("reserve one-ZEC Names bond: {error:?}"))?;
+    with_wallet_db_write_lock("names.reserve_commit_bond", || {
+        db.lock_outputs(&[bond_ref], lock_owner, lock_expiry)
+            .map_err(|error| format!("reserve one-ZEC Names bond: {error:?}"))
+    })?;
     drop(db);
 
     let receiver = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(
@@ -444,8 +459,11 @@ pub(crate) fn begin_registration(
     ) {
         Ok(proposal) => proposal,
         Err(error) => {
-            let mut db = open_wallet_db(db_path, network)?;
-            let _ = db.unlock_output(&bond_ref, lock_owner);
+            with_wallet_db_write_lock("names.release_commit_bond", || {
+                let mut db = open_wallet_db(db_path, network)?;
+                let _ = db.unlock_output(&bond_ref, lock_owner);
+                Ok::<(), String>(())
+            })?;
             return Err(error);
         }
     };
@@ -471,8 +489,11 @@ pub(crate) fn begin_registration(
         };
     if let Err(error) = persisted {
         let _ = sync::discard_proposal(proposal.proposal_id, send_flow_id);
-        let mut db = open_wallet_db(db_path, network)?;
-        let _ = db.unlock_output(&bond_ref, lock_owner);
+        with_wallet_db_write_lock("names.release_commit_bond", || {
+            let mut db = open_wallet_db(db_path, network)?;
+            let _ = db.unlock_output(&bond_ref, lock_owner);
+            Ok::<(), String>(())
+        })?;
         return Err(error);
     }
     Ok(NamesCommitProposal {
@@ -502,10 +523,12 @@ pub(crate) fn cancel_registration_proposal(
         PoolType::Shielded(ShieldedPool::Ironwood),
         output_index,
     );
-    let mut db = open_wallet_db(db_path, network)?;
-    db.unlock_output(&output, LockOwner::new(registration.commitment))
-        .map(|_| ())
-        .map_err(|error| format!("release cancelled Names bond: {error:?}"))
+    with_wallet_db_write_lock("names.release_cancelled_bond", || {
+        let mut db = open_wallet_db(db_path, network)?;
+        db.unlock_output(&output, LockOwner::new(registration.commitment))
+            .map(|_| ())
+            .map_err(|error| format!("release cancelled Names bond: {error:?}"))
+    })
 }
 
 /// Discards a locally abandoned pre-REVEAL workflow. This never changes
@@ -550,8 +573,11 @@ pub(crate) fn discard_registration_workflow(
                 PoolType::Shielded(ShieldedPool::Ironwood),
                 output_index,
             );
-            let mut db = open_wallet_db(db_path, network)?;
-            let _ = db.unlock_output(&output, LockOwner::new(registration.commitment));
+            with_wallet_db_write_lock("names.release_discarded_bond", || {
+                let mut db = open_wallet_db(db_path, network)?;
+                let _ = db.unlock_output(&output, LockOwner::new(registration.commitment));
+                Ok::<(), String>(())
+            })?;
         }
     }
     Ok(())
@@ -561,6 +587,44 @@ pub(crate) struct NamesRevealTransaction {
     pub raw: Vec<u8>,
     pub txid: [u8; 32],
     pub name: String,
+    pub account_uuid: String,
+    pub db_path: String,
+    pub network: WalletNetwork,
+    pub construction_height: u32,
+    pub params: coppice_names::v1::V1Parameters,
+    pub fee_zatoshi: u64,
+    fee_reservation: Option<NamesFeeReservation>,
+}
+
+pub(crate) struct NamesRevealProposal {
+    pub proposal_id: u64,
+    pub fee_zatoshi: u64,
+}
+
+struct NamesFeeReservation {
+    db_path: String,
+    network: WalletNetwork,
+    output: Option<OutputRef>,
+    owner: LockOwner,
+}
+
+impl NamesFeeReservation {
+    fn disarm(&mut self) {
+        self.output = None;
+    }
+}
+
+impl Drop for NamesFeeReservation {
+    fn drop(&mut self) {
+        let Some(output) = self.output.as_ref() else {
+            return;
+        };
+        with_wallet_db_write_lock("names.release_failed_fee_note", || {
+            if let Ok(mut db) = open_wallet_db(&self.db_path, self.network) {
+                let _ = db.unlock_output(output, self.owner);
+            }
+        });
+    }
 }
 
 fn operation_seed(seed: &[u8], commitment: [u8; 32], label: &[u8]) -> [u8; 32] {
@@ -595,6 +659,9 @@ pub(crate) fn build_reveal(
                 && registration.name == name.trim().trim_end_matches(".zec").to_ascii_lowercase()
         })
         .ok_or_else(|| "this wallet has no pending registration for that name".to_string())?;
+    if registration.phase == "reveal_broadcast" && registration.reveal_txid.is_some() {
+        return Err("REVEAL is already broadcast and awaits its scheduled block".to_string());
+    }
     let commit =
         coppice::accepted_commit(db_path, network, registration.commitment)?.ok_or_else(|| {
             "the exact COMMIT is not yet accepted in canonical Names history".to_string()
@@ -642,7 +709,9 @@ pub(crate) fn build_reveal(
     .ok_or_else(|| "no future legal Names REVEAL height exists".to_string())?;
     if construction_height != target_height {
         return Err(format!(
-            "REVEAL is scheduled for block {target_height}; wallet tip is {}",
+            "REVEAL must be built exactly at its scheduled block. The next \
+             window for this name opens at block {target_height} (wallet tip \
+             is {}). Sync to that height minus one and press Reveal again.",
             context.tip_height
         ));
     }
@@ -711,157 +780,318 @@ pub(crate) fn build_reveal(
         PoolType::Shielded(ShieldedPool::Ironwood),
         u32::from(funding_note.output_index()),
     );
-    db.lock_outputs(
-        &[funding_ref],
-        LockOwner::new(preparation.statement().commitment),
-        BlockHeight::from_u32(construction_height.saturating_add(2)),
-    )
-    .map_err(|error| format!("reserve Names REVEAL fee note: {error:?}"))?;
-    drop(seed);
-    let proof = OrchardV1ProofProver::new()
-        .prove_genesis(
-            preparation.statement(),
-            preparation.witness().clone(),
-            rand_10::rng(),
+    let funding_lock_owner = LockOwner::new(preparation.statement().commitment);
+    with_wallet_db_write_lock("names.reserve_reveal_fee_note", || {
+        db.lock_outputs(
+            &[funding_ref],
+            funding_lock_owner,
+            BlockHeight::from_u32(construction_height.saturating_add(2)),
         )
-        .map_err(|error| format!("prove Names REVEAL: {error:?}"))?;
-    let operation = preparation
-        .finalize(proof, context.core_runtime_id)
-        .map_err(|error| format!("finalize Names REVEAL: {error:#}"))?;
+        .map_err(|error| format!("reserve Names REVEAL fee note: {error:?}"))
+    })?;
+    let fee_reservation = NamesFeeReservation {
+        db_path: db_path.to_string(),
+        network,
+        output: Some(funding_ref),
+        owner: funding_lock_owner,
+    };
+    // Every step after the fee-note reservation can still fail (proof,
+    // planning, witnesses, signing, broadcast). Release the reservation so a
+    // failed attempt never strands the note until lock expiry. Expensive proof
+    // generation remains outside the wallet write lock; only commitment-tree
+    // access is serialized with sync.
+    let authorized = (|| -> Result<NamesRevealTransaction, String> {
+        drop(seed);
+        let proof = OrchardV1ProofProver::new()
+            .prove_genesis(
+                preparation.statement(),
+                preparation.witness().clone(),
+                rand_10::rng(),
+            )
+            .map_err(|error| format!("prove Names REVEAL: {error:?}"))?;
+        let operation = preparation
+            .finalize(proof, context.core_runtime_id)
+            .map_err(|error| format!("finalize Names REVEAL: {error:#}"))?;
 
-    let (shape, fee) = planned_state_operation_shape_and_fee(&network, &operation, 1, 1)
-        .map_err(|error| format!("plan Names REVEAL fee: {error:#}"))?;
-    let carrier_total = u64::try_from(operation.frames().len())
-        .map_err(|_| "Names carrier count exceeds u64".to_string())?;
-    let change_value = funding_note
-        .note()
-        .value()
-        .inner()
-        .checked_sub(carrier_total)
-        .and_then(|value| value.checked_sub(fee.into_u64()))
-        .ok_or_else(|| "separate Ironwood note cannot cover Names fee".to_string())?;
-    let recipient = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(
-        &context.rendezvous_receiver,
-    ))
-    .ok_or_else(|| "configured Names rendezvous receiver is invalid".to_string())?;
-    let planned = plan_state_operation(
-        &network,
-        &operation,
-        CarrierPlan {
-            recipient,
-            value: NoteValue::from_raw(1),
-        },
-        SuccessorTransport {
-            ovk: None,
-            memo: [0; 512],
-        },
-        OperationFunding {
-            funding_spends: vec![FundingSpend {
-                fvk: fvk.clone(),
-                note: *funding_note.note(),
-            }],
-            change_outputs: vec![ChangeOutput {
-                fvk: fvk.clone(),
+        let (shape, fee) = planned_state_operation_shape_and_fee(&network, &operation, 1, 1)
+            .map_err(|error| format!("plan Names REVEAL fee: {error:#}"))?;
+        let carrier_total = u64::try_from(operation.frames().len())
+            .map_err(|_| "Names carrier count exceeds u64".to_string())?;
+        let change_value = funding_note
+            .note()
+            .value()
+            .inner()
+            .checked_sub(carrier_total)
+            .and_then(|value| value.checked_sub(fee.into_u64()))
+            .ok_or_else(|| "separate Ironwood note cannot cover Names fee".to_string())?;
+        let recipient = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(
+            &context.rendezvous_receiver,
+        ))
+        .ok_or_else(|| "configured Names rendezvous receiver is invalid".to_string())?;
+        let planned = plan_state_operation(
+            &network,
+            &operation,
+            CarrierPlan {
+                recipient,
+                value: NoteValue::from_raw(1),
+            },
+            SuccessorTransport {
                 ovk: None,
-                recipient: fvk.address_at(0u32, Scope::Internal),
-                value: NoteValue::from_raw(change_value),
                 memo: [0; 512],
-            }],
-        },
-    )
-    .map_err(|error| format!("plan Names REVEAL: {error:#}"))?;
-    if planned.planned_shape != shape {
-        return Err("Names REVEAL shape changed after fee planning".to_string());
-    }
-    let built = build_names_v1_bundle(planned.plan, rand_10::rng())
-        .map_err(|error| format!("build Names REVEAL bundle: {error:#}"))?;
-    let built = build_names_v1_pczt(NamesV1PcztPlan {
-        ironwood: built,
-        params: network,
-        consensus_branch_id: BranchId::Nu6_3,
-        expiry_height: BlockHeight::from_u32(construction_height),
-        fallback_lock_time: 0,
-    })
-    .map_err(|error| format!("build Names REVEAL PCZT: {error:#}"))?;
-    let finalized = finalize_names_v1_pczt_io(built)
-        .map_err(|error| format!("finalize Names REVEAL PCZT: {error:#}"))?;
-    let anchor_height = db
-        .get_target_and_anchor_heights(std::num::NonZeroU32::MIN)
-        .map_err(|error| format!("read Names anchor: {error}"))?
-        .ok_or_else(|| "wallet has no Names anchor height".to_string())?
-        .1;
-    let (anchor, paths) = db
-        .with_ironwood_tree_mut::<_, _, SqliteClientError>(|tree| {
-            let anchor = tree.root_at_checkpoint_id(&anchor_height)?;
-            let paths = [
-                registration_note.note_commitment_tree_position(),
-                funding_note.note_commitment_tree_position(),
-            ]
-            .map(|position| tree.witness_at_checkpoint_id_caching(position, &anchor_height));
-            Ok((anchor, paths))
+            },
+            OperationFunding {
+                funding_spends: vec![FundingSpend {
+                    fvk: fvk.clone(),
+                    note: *funding_note.note(),
+                }],
+                change_outputs: vec![ChangeOutput {
+                    fvk: fvk.clone(),
+                    ovk: None,
+                    recipient: fvk.address_at(0u32, Scope::Internal),
+                    value: NoteValue::from_raw(change_value),
+                    memo: [0; 512],
+                }],
+            },
+        )
+        .map_err(|error| format!("plan Names REVEAL: {error:#}"))?;
+        if planned.planned_shape != shape {
+            return Err("Names REVEAL shape changed after fee planning".to_string());
+        }
+        let built = build_names_v1_bundle(planned.plan, rand_10::rng())
+            .map_err(|error| format!("build Names REVEAL bundle: {error:#}"))?;
+        let built = build_names_v1_pczt(NamesV1PcztPlan {
+            ironwood: built,
+            params: network,
+            consensus_branch_id: BranchId::Nu6_3,
+            expiry_height: BlockHeight::from_u32(construction_height),
+            fallback_lock_time: 0,
+        })
+        .map_err(|error| format!("build Names REVEAL PCZT: {error:#}"))?;
+        let finalized = finalize_names_v1_pczt_io(built)
+            .map_err(|error| format!("finalize Names REVEAL PCZT: {error:#}"))?;
+        let anchor_height = db
+            .get_target_and_anchor_heights(std::num::NonZeroU32::MIN)
+            .map_err(|error| format!("read Names anchor: {error}"))?
+            .ok_or_else(|| "wallet has no Names anchor height".to_string())?
+            .1;
+        let (anchor, paths) = with_wallet_db_write_lock("names.read_reveal_witnesses", || {
+            db.with_ironwood_tree_mut::<_, _, SqliteClientError>(|tree| {
+                let anchor = tree.root_at_checkpoint_id(&anchor_height)?;
+                let paths = [
+                    registration_note.note_commitment_tree_position(),
+                    funding_note.note_commitment_tree_position(),
+                ]
+                .map(|position| tree.witness_at_checkpoint_id_caching(position, &anchor_height));
+                Ok((anchor, paths))
+            })
         })
         .map_err(|error| format!("read Names witnesses: {error}"))?
         .ok_or_else(|| "wallet has no Ironwood commitment tree".to_string())?;
-    let anchor: orchard::Anchor = anchor
-        .ok_or_else(|| "wallet has no Ironwood anchor root".to_string())?
-        .into();
-    let paths = paths.map(|path| {
-        path.map_err(|error| format!("read Names witness: {error:?}"))?
-            .ok_or_else(|| "wallet has no Ironwood witness at anchor".to_string())
-            .map(Into::into)
+        let anchor: orchard::Anchor = anchor
+            .ok_or_else(|| "wallet has no Ironwood anchor root".to_string())?
+            .into();
+        let paths = paths.map(|path| {
+            path.map_err(|error| format!("read Names witness: {error:?}"))?
+                .ok_or_else(|| "wallet has no Ironwood witness at anchor".to_string())
+                .map(Into::into)
+        });
+        let [path0, path1] = paths;
+        let witnessed = install_names_v1_ironwood_witnesses(
+            finalized,
+            NamesV1WitnessPlan {
+                anchor,
+                spends: vec![
+                    NamesV1IronwoodWitness {
+                        nullifier: registration_nf,
+                        merkle_path: path0?,
+                    },
+                    NamesV1IronwoodWitness {
+                        nullifier: funding_nf,
+                        merkle_path: path1?,
+                    },
+                ],
+            },
+        )
+        .map_err(|error| format!("install Names witnesses: {error:#}"))?;
+        let consensus_key = orchard::circuit::ProvingKey::build(
+            orchard::bundle::BundleVersion::ironwood_v3().circuit_version(),
+        );
+        let proved = prove_names_v1_ironwood_pczt(witnessed, &consensus_key)
+            .map_err(|error| format!("prove Names Ironwood transaction: {error:#}"))?;
+        let signed = sign_names_v1_ironwood_pczt(
+            proved,
+            NamesV1SigningPlan {
+                spends: vec![
+                    NamesV1IronwoodSigningKey {
+                        nullifier: registration_nf,
+                        ask: ask.clone(),
+                    },
+                    NamesV1IronwoodSigningKey {
+                        nullifier: funding_nf,
+                        ask,
+                    },
+                ],
+            },
+        )
+        .map_err(|error| format!("sign Names REVEAL: {error:#}"))?;
+        let extracted = extract_names_v1_transaction(signed)
+            .map_err(|error| format!("extract Names REVEAL: {error:#}"))?;
+        let txid = extracted.txid.into();
+        let mut raw = Vec::new();
+        extracted
+            .transaction
+            .write(&mut raw)
+            .map_err(|error| format!("encode Names REVEAL: {error}"))?;
+        Ok(NamesRevealTransaction {
+            raw,
+            txid,
+            name: registration.name,
+            account_uuid: account_uuid.to_string(),
+            db_path: db_path.to_string(),
+            network,
+            construction_height,
+            params: context.params,
+            fee_zatoshi: fee.into_u64(),
+            fee_reservation: Some(fee_reservation),
+        })
+    })();
+    authorized
+}
+
+fn store_reviewed_reveal_capability(
+    transaction: NamesRevealTransaction,
+    send_flow_id: &str,
+) -> Result<u64, String> {
+    let reservation = Arc::new(Mutex::new(transaction.fee_reservation));
+    let release_reservation = reservation.clone();
+    let release = Arc::new(move || {
+        let mut reservation = release_reservation
+            .lock()
+            .map_err(|error| format!("lock Names REVEAL fee reservation: {error}"))?;
+        // Dropping the armed reservation unlocks the temporary fee note.
+        let _ = reservation.take();
+        Ok(())
     });
-    let [path0, path1] = paths;
-    let witnessed = install_names_v1_ironwood_witnesses(
-        finalized,
-        NamesV1WitnessPlan {
-            anchor,
-            spends: vec![
-                NamesV1IronwoodWitness {
-                    nullifier: registration_nf,
-                    merkle_path: path0?,
-                },
-                NamesV1IronwoodWitness {
-                    nullifier: funding_nf,
-                    merkle_path: path1?,
-                },
-            ],
+    let retain_reservation = reservation.clone();
+    let retain = Arc::new(move |_lock: sync::NamesRevealLockMetadata| {
+        let mut reservation = retain_reservation
+            .lock()
+            .map_err(|error| format!("lock Names REVEAL fee reservation: {error}"))?;
+        // The DB lock already has the bounded expiry set by build_reveal.
+        // Disarm only the local Drop unlock path after broadcast acceptance.
+        if let Some(reservation) = reservation.as_mut() {
+            reservation.disarm();
+        }
+        Ok(())
+    });
+    let execution = sync::NamesRevealExecution {
+        raw: transaction.raw,
+        txid: transaction.txid,
+        db_path: transaction.db_path,
+        network: transaction.network,
+        account_uuid: transaction.account_uuid,
+        name: transaction.name,
+        construction_height: transaction.construction_height,
+        params: transaction.params,
+        fee_zatoshi: transaction.fee_zatoshi,
+    };
+    sync::allocate_names_reveal_capability(
+        send_flow_id,
+        execution,
+        sync::NamesRevealLockMetadata {
+            expiry_height: u64::from(transaction.construction_height.saturating_add(2)),
         },
+        sync::NamesRevealCleanup::Callbacks { release, retain },
     )
-    .map_err(|error| format!("install Names witnesses: {error:#}"))?;
-    let consensus_key = orchard::circuit::ProvingKey::build(
-        orchard::bundle::BundleVersion::ironwood_v3().circuit_version(),
-    );
-    let proved = prove_names_v1_ironwood_pczt(witnessed, &consensus_key)
-        .map_err(|error| format!("prove Names Ironwood transaction: {error:#}"))?;
-    let signed = sign_names_v1_ironwood_pczt(
-        proved,
-        NamesV1SigningPlan {
-            spends: vec![
-                NamesV1IronwoodSigningKey {
-                    nullifier: registration_nf,
-                    ask: ask.clone(),
-                },
-                NamesV1IronwoodSigningKey {
-                    nullifier: funding_nf,
-                    ask,
-                },
-            ],
-        },
-    )
-    .map_err(|error| format!("sign Names REVEAL: {error:#}"))?;
-    let extracted = extract_names_v1_transaction(signed)
-        .map_err(|error| format!("extract Names REVEAL: {error:#}"))?;
-    let txid = extracted.txid.into();
-    let mut raw = Vec::new();
-    extracted
-        .transaction
-        .write(&mut raw)
-        .map_err(|error| format!("encode Names REVEAL: {error}"))?;
-    Ok(NamesRevealTransaction {
-        raw,
-        txid,
-        name: registration.name,
+}
+
+/// Builds, signs, and stores a reviewed REVEAL capability without broadcasting.
+pub(crate) async fn begin_reviewed_reveal(
+    db_path: &str,
+    lightwalletd_url: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+    name: &str,
+    send_flow_id: &str,
+    seed: SecretVec<u8>,
+) -> Result<NamesRevealProposal, String> {
+    let context = coppice::lifecycle_context(db_path, network)?;
+    ensure_live_construction_window(lightwalletd_url, context.tip_height, name, context.params)
+        .await?;
+    let construction_height = context
+        .tip_height
+        .checked_add(1)
+        .ok_or_else(|| "Names construction height overflow".to_string())?;
+    let transaction = build_reveal(db_path, network, account_uuid, name, seed)?;
+    ensure_broadcast_window_open(lightwalletd_url, construction_height, name, context.params)
+        .await?;
+    let fee_zatoshi = transaction.fee_zatoshi;
+    let proposal_id = store_reviewed_reveal_capability(transaction, send_flow_id)?;
+    Ok(NamesRevealProposal {
+        proposal_id,
+        fee_zatoshi,
     })
+}
+
+/// Reads the live chain tip from the wallet's lightwalletd endpoint.
+async fn live_chain_tip(lightwalletd_url: &str) -> Result<u32, String> {
+    let mut client = crate::wallet::sync_engine::open_isolated_lwd_channel(lightwalletd_url)
+        .await
+        .map_err(|error| format!("open chain-tip channel: {error}"))?;
+    let tip = crate::wallet::sync_engine::get_latest_block(&mut client)
+        .await
+        .map_err(|error| format!("read chain tip: {error}"))?;
+    u32::try_from(tip.height).map_err(|_| "chain tip exceeds supported height".to_string())
+}
+
+/// The REVEAL/state-transition window is exactly one block at the name's
+/// scheduled anchor. The Names sidecar tip advances only during wallet sync,
+/// so it can lag the live chain tip; a transaction built from a stale tip
+/// carries an expiry in the past and is rejected by the backing node on
+/// arrival. Fails fast with the next legal window when the wallet is not
+/// current.
+async fn ensure_live_construction_window(
+    lightwalletd_url: &str,
+    sidecar_tip: u32,
+    name: &str,
+    params: coppice_names::v1::V1Parameters,
+) -> Result<(), String> {
+    let live_tip = live_chain_tip(lightwalletd_url).await?;
+    if live_tip == sidecar_tip {
+        return Ok(());
+    }
+    let name_id = coppice_names::v1::state::name_id(name)
+        .map_err(|error| format!("derive Names name id: {error:?}"))?;
+    let next = coppice_names::v1::schedule::next_anchor_height(name_id, live_tip + 1, params)
+        .ok_or_else(|| "no future legal Names REVEAL height exists".to_string())?;
+    Err(format!(
+        "the wallet is not current with the chain tip (wallet {sidecar_tip}, \
+         chain {live_tip}); the next REVEAL window for this name opens at \
+         block {next}"
+    ))
+}
+
+/// Re-checks the live tip right before broadcast: a block mined while the
+/// operation was being proven closes the one-block window, and broadcasting
+/// would only produce a transaction the backing node must reject as expired.
+pub(crate) async fn ensure_broadcast_window_open(
+    lightwalletd_url: &str,
+    construction_height: u32,
+    name: &str,
+    params: coppice_names::v1::V1Parameters,
+) -> Result<(), String> {
+    let live_tip = live_chain_tip(lightwalletd_url).await?;
+    if live_tip + 1 == construction_height {
+        return Ok(());
+    }
+    let name_id = coppice_names::v1::state::name_id(name)
+        .map_err(|error| format!("derive Names name id: {error:?}"))?;
+    let next = coppice_names::v1::schedule::next_anchor_height(name_id, live_tip + 1, params)
+        .ok_or_else(|| "no future legal Names REVEAL height exists".to_string())?;
+    Err(format!(
+        "the chain advanced while the operation was being built; the next \
+         REVEAL window for this name opens at block {next}"
+    ))
 }
 
 pub(crate) async fn reveal_registration(
@@ -872,8 +1102,17 @@ pub(crate) async fn reveal_registration(
     name: &str,
     seed: SecretVec<u8>,
 ) -> Result<[u8; 32], String> {
-    let transaction = build_reveal(db_path, network, account_uuid, name, seed)?;
+    let context = coppice::lifecycle_context(db_path, network)?;
+    ensure_live_construction_window(lightwalletd_url, context.tip_height, name, context.params)
+        .await?;
+    let construction_height = context.tip_height.saturating_add(1);
+    let mut transaction = build_reveal(db_path, network, account_uuid, name, seed)?;
+    ensure_broadcast_window_open(lightwalletd_url, construction_height, name, context.params)
+        .await?;
     sync::broadcast_raw_transaction_isolated(lightwalletd_url, &transaction.raw).await?;
+    if let Some(reservation) = transaction.fee_reservation.as_mut() {
+        reservation.disarm();
+    }
     sync::decrypt_and_store_transaction(db_path, network, &transaction.raw, None)?;
     coppice::record_reveal_broadcast(db_path, account_uuid, &transaction.name, transaction.txid)?;
     Ok(transaction.txid)
@@ -883,6 +1122,16 @@ pub(crate) async fn reveal_registration(
 /// This is protection only: canonical applicability remains owned by the
 /// Names runtime. A normal wallet send must never consume a current state note.
 pub(crate) fn protect_managed_heads(
+    db_path: &str,
+    network: WalletNetwork,
+    host: &coppice::NamesWalletHost,
+) -> Result<(), String> {
+    with_wallet_db_write_lock("names.protect_managed_heads", || {
+        protect_managed_heads_locked(db_path, network, host)
+    })
+}
+
+fn protect_managed_heads_locked(
     db_path: &str,
     network: WalletNetwork,
     host: &coppice::NamesWalletHost,
@@ -1042,159 +1291,182 @@ pub(crate) fn build_transition(
         PoolType::Shielded(ShieldedPool::Ironwood),
         u32::from(funding_note.output_index()),
     );
-    db.lock_outputs(
-        &[funding_ref],
-        LockOwner::new(preparation.statement().successor_commitment),
-        BlockHeight::from_u32(height.saturating_add(2)),
-    )
-    .map_err(|error| format!("reserve Names {} fee note: {error:?}", kind.label()))?;
-    drop(seed);
-    let proof = OrchardV1ProofProver::new()
-        .prove_transition(
-            preparation.statement(),
-            preparation.witness().clone(),
-            rand_10::rng(),
+    let funding_lock_owner = LockOwner::new(preparation.statement().successor_commitment);
+    with_wallet_db_write_lock("names.reserve_transition_fee_note", || {
+        db.lock_outputs(
+            &[funding_ref],
+            funding_lock_owner,
+            BlockHeight::from_u32(height.saturating_add(2)),
         )
-        .map_err(|error| format!("prove Names {}: {error:?}", kind.label()))?;
-    let operation = preparation
-        .finalize(proof, context.core_runtime_id)
-        .map_err(|error| format!("finalize Names {}: {error:#}", kind.label()))?;
-    let (shape, fee) = planned_state_operation_shape_and_fee(&network, &operation, 1, 1)
-        .map_err(|error| format!("plan Names {} fee: {error:#}", kind.label()))?;
-    let carrier_total = u64::try_from(operation.frames().len())
-        .map_err(|_| "Names carrier count exceeds u64".to_string())?;
-    let change_value = funding_note
-        .note()
-        .value()
-        .inner()
-        .checked_sub(carrier_total)
-        .and_then(|value| value.checked_sub(fee.into_u64()))
-        .ok_or_else(|| "separate Ironwood note cannot cover Names fee".to_string())?;
-    let recipient = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(
-        &context.rendezvous_receiver,
-    ))
-    .ok_or_else(|| "configured Names rendezvous receiver is invalid".to_string())?;
-    let planned = plan_state_operation(
-        &network,
-        &operation,
-        CarrierPlan {
-            recipient,
-            value: NoteValue::from_raw(1),
-        },
-        SuccessorTransport {
-            ovk: None,
-            memo: [0; 512],
-        },
-        OperationFunding {
-            funding_spends: vec![FundingSpend {
-                fvk: fvk.clone(),
-                note: *funding_note.note(),
-            }],
-            change_outputs: vec![ChangeOutput {
-                fvk: fvk.clone(),
+        .map_err(|error| format!("reserve Names {} fee note: {error:?}", kind.label()))
+    })?;
+    let fee_reservation = NamesFeeReservation {
+        db_path: db_path.to_string(),
+        network,
+        output: Some(funding_ref),
+        owner: funding_lock_owner,
+    };
+    // Same reservation-release guarantee as REVEAL: a failure after the
+    // fee-note lock must never strand the note until lock expiry. Expensive
+    // proving stays outside the wallet write lock.
+    let authorized = (|| -> Result<NamesRevealTransaction, String> {
+        drop(seed);
+        let proof = OrchardV1ProofProver::new()
+            .prove_transition(
+                preparation.statement(),
+                preparation.witness().clone(),
+                rand_10::rng(),
+            )
+            .map_err(|error| format!("prove Names {}: {error:?}", kind.label()))?;
+        let operation = preparation
+            .finalize(proof, context.core_runtime_id)
+            .map_err(|error| format!("finalize Names {}: {error:#}", kind.label()))?;
+        let (shape, fee) = planned_state_operation_shape_and_fee(&network, &operation, 1, 1)
+            .map_err(|error| format!("plan Names {} fee: {error:#}", kind.label()))?;
+        let carrier_total = u64::try_from(operation.frames().len())
+            .map_err(|_| "Names carrier count exceeds u64".to_string())?;
+        let change_value = funding_note
+            .note()
+            .value()
+            .inner()
+            .checked_sub(carrier_total)
+            .and_then(|value| value.checked_sub(fee.into_u64()))
+            .ok_or_else(|| "separate Ironwood note cannot cover Names fee".to_string())?;
+        let recipient = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(
+            &context.rendezvous_receiver,
+        ))
+        .ok_or_else(|| "configured Names rendezvous receiver is invalid".to_string())?;
+        let planned = plan_state_operation(
+            &network,
+            &operation,
+            CarrierPlan {
+                recipient,
+                value: NoteValue::from_raw(1),
+            },
+            SuccessorTransport {
                 ovk: None,
-                recipient: fvk.address_at(0u32, Scope::Internal),
-                value: NoteValue::from_raw(change_value),
                 memo: [0; 512],
-            }],
-        },
-    )
-    .map_err(|error| format!("plan Names {}: {error:#}", kind.label()))?;
-    if planned.planned_shape != shape {
-        return Err(format!(
-            "Names {} shape changed after fee planning",
-            kind.label()
-        ));
-    }
-    let built = build_names_v1_bundle(planned.plan, rand_10::rng())
-        .map_err(|error| format!("build Names {} bundle: {error:#}", kind.label()))?;
-    let built = build_names_v1_pczt(NamesV1PcztPlan {
-        ironwood: built,
-        params: network,
-        consensus_branch_id: BranchId::Nu6_3,
-        expiry_height: BlockHeight::from_u32(height),
-        fallback_lock_time: 0,
-    })
-    .map_err(|error| format!("build Names {} PCZT: {error:#}", kind.label()))?;
-    let finalized = finalize_names_v1_pczt_io(built)
-        .map_err(|error| format!("finalize Names {} PCZT: {error:#}", kind.label()))?;
-    let anchor_height = db
-        .get_target_and_anchor_heights(std::num::NonZeroU32::MIN)
-        .map_err(|error| format!("read Names anchor: {error}"))?
-        .ok_or_else(|| "wallet has no Names anchor height".to_string())?
-        .1;
-    let (anchor, paths) = db
-        .with_ironwood_tree_mut::<_, _, SqliteClientError>(|tree| {
-            let anchor = tree.root_at_checkpoint_id(&anchor_height)?;
-            let paths = [
-                state_note.note_commitment_tree_position(),
-                funding_note.note_commitment_tree_position(),
-            ]
-            .map(|position| tree.witness_at_checkpoint_id_caching(position, &anchor_height));
-            Ok((anchor, paths))
+            },
+            OperationFunding {
+                funding_spends: vec![FundingSpend {
+                    fvk: fvk.clone(),
+                    note: *funding_note.note(),
+                }],
+                change_outputs: vec![ChangeOutput {
+                    fvk: fvk.clone(),
+                    ovk: None,
+                    recipient: fvk.address_at(0u32, Scope::Internal),
+                    value: NoteValue::from_raw(change_value),
+                    memo: [0; 512],
+                }],
+            },
+        )
+        .map_err(|error| format!("plan Names {}: {error:#}", kind.label()))?;
+        if planned.planned_shape != shape {
+            return Err(format!(
+                "Names {} shape changed after fee planning",
+                kind.label()
+            ));
+        }
+        let built = build_names_v1_bundle(planned.plan, rand_10::rng())
+            .map_err(|error| format!("build Names {} bundle: {error:#}", kind.label()))?;
+        let built = build_names_v1_pczt(NamesV1PcztPlan {
+            ironwood: built,
+            params: network,
+            consensus_branch_id: BranchId::Nu6_3,
+            expiry_height: BlockHeight::from_u32(height),
+            fallback_lock_time: 0,
+        })
+        .map_err(|error| format!("build Names {} PCZT: {error:#}", kind.label()))?;
+        let finalized = finalize_names_v1_pczt_io(built)
+            .map_err(|error| format!("finalize Names {} PCZT: {error:#}", kind.label()))?;
+        let anchor_height = db
+            .get_target_and_anchor_heights(std::num::NonZeroU32::MIN)
+            .map_err(|error| format!("read Names anchor: {error}"))?
+            .ok_or_else(|| "wallet has no Names anchor height".to_string())?
+            .1;
+        let (anchor, paths) = with_wallet_db_write_lock("names.read_transition_witnesses", || {
+            db.with_ironwood_tree_mut::<_, _, SqliteClientError>(|tree| {
+                let anchor = tree.root_at_checkpoint_id(&anchor_height)?;
+                let paths = [
+                    state_note.note_commitment_tree_position(),
+                    funding_note.note_commitment_tree_position(),
+                ]
+                .map(|position| tree.witness_at_checkpoint_id_caching(position, &anchor_height));
+                Ok((anchor, paths))
+            })
         })
         .map_err(|error| format!("read Names witnesses: {error}"))?
         .ok_or_else(|| "wallet has no Ironwood commitment tree".to_string())?;
-    let anchor: orchard::Anchor = anchor
-        .ok_or_else(|| "wallet has no Ironwood anchor root".to_string())?
-        .into();
-    let paths = paths.map(|path| {
-        path.map_err(|error| format!("read Names witness: {error:?}"))?
-            .ok_or_else(|| "wallet has no Ironwood witness at anchor".to_string())
-            .map(Into::into)
-    });
-    let [path0, path1] = paths;
-    let witnessed = install_names_v1_ironwood_witnesses(
-        finalized,
-        NamesV1WitnessPlan {
-            anchor,
-            spends: vec![
-                NamesV1IronwoodWitness {
-                    nullifier: state_nf,
-                    merkle_path: path0?,
-                },
-                NamesV1IronwoodWitness {
-                    nullifier: funding_nf,
-                    merkle_path: path1?,
-                },
-            ],
-        },
-    )
-    .map_err(|error| format!("install Names witnesses: {error:#}"))?;
-    let consensus_key = orchard::circuit::ProvingKey::build(
-        orchard::bundle::BundleVersion::ironwood_v3().circuit_version(),
-    );
-    let proved = prove_names_v1_ironwood_pczt(witnessed, &consensus_key)
-        .map_err(|error| format!("prove Names Ironwood transaction: {error:#}"))?;
-    let signed = sign_names_v1_ironwood_pczt(
-        proved,
-        NamesV1SigningPlan {
-            spends: vec![
-                NamesV1IronwoodSigningKey {
-                    nullifier: state_nf,
-                    ask: ask.clone(),
-                },
-                NamesV1IronwoodSigningKey {
-                    nullifier: funding_nf,
-                    ask,
-                },
-            ],
-        },
-    )
-    .map_err(|error| format!("sign Names {}: {error:#}", kind.label()))?;
-    let extracted = extract_names_v1_transaction(signed)
-        .map_err(|error| format!("extract Names {}: {error:#}", kind.label()))?;
-    let txid = extracted.txid.into();
-    let mut raw = Vec::new();
-    extracted
-        .transaction
-        .write(&mut raw)
-        .map_err(|error| format!("encode Names {}: {error}", kind.label()))?;
-    Ok(NamesRevealTransaction {
-        raw,
-        txid,
-        name: canonical_name,
-    })
+        let anchor: orchard::Anchor = anchor
+            .ok_or_else(|| "wallet has no Ironwood anchor root".to_string())?
+            .into();
+        let paths = paths.map(|path| {
+            path.map_err(|error| format!("read Names witness: {error:?}"))?
+                .ok_or_else(|| "wallet has no Ironwood witness at anchor".to_string())
+                .map(Into::into)
+        });
+        let [path0, path1] = paths;
+        let witnessed = install_names_v1_ironwood_witnesses(
+            finalized,
+            NamesV1WitnessPlan {
+                anchor,
+                spends: vec![
+                    NamesV1IronwoodWitness {
+                        nullifier: state_nf,
+                        merkle_path: path0?,
+                    },
+                    NamesV1IronwoodWitness {
+                        nullifier: funding_nf,
+                        merkle_path: path1?,
+                    },
+                ],
+            },
+        )
+        .map_err(|error| format!("install Names witnesses: {error:#}"))?;
+        let consensus_key = orchard::circuit::ProvingKey::build(
+            orchard::bundle::BundleVersion::ironwood_v3().circuit_version(),
+        );
+        let proved = prove_names_v1_ironwood_pczt(witnessed, &consensus_key)
+            .map_err(|error| format!("prove Names Ironwood transaction: {error:#}"))?;
+        let signed = sign_names_v1_ironwood_pczt(
+            proved,
+            NamesV1SigningPlan {
+                spends: vec![
+                    NamesV1IronwoodSigningKey {
+                        nullifier: state_nf,
+                        ask: ask.clone(),
+                    },
+                    NamesV1IronwoodSigningKey {
+                        nullifier: funding_nf,
+                        ask,
+                    },
+                ],
+            },
+        )
+        .map_err(|error| format!("sign Names {}: {error:#}", kind.label()))?;
+        let extracted = extract_names_v1_transaction(signed)
+            .map_err(|error| format!("extract Names {}: {error:#}", kind.label()))?;
+        let txid = extracted.txid.into();
+        let mut raw = Vec::new();
+        extracted
+            .transaction
+            .write(&mut raw)
+            .map_err(|error| format!("encode Names {}: {error}", kind.label()))?;
+        Ok(NamesRevealTransaction {
+            raw,
+            txid,
+            name: canonical_name,
+            account_uuid: account_uuid.to_string(),
+            db_path: db_path.to_string(),
+            network,
+            construction_height: height,
+            params: context.params,
+            fee_zatoshi: fee.into_u64(),
+            fee_reservation: Some(fee_reservation),
+        })
+    })();
+    authorized
 }
 
 pub(crate) async fn execute_transition(
@@ -1206,8 +1478,17 @@ pub(crate) async fn execute_transition(
     kind: NamesTransitionKind,
     seed: SecretVec<u8>,
 ) -> Result<[u8; 32], String> {
-    let transaction = build_transition(db_path, network, account_uuid, name, kind, seed)?;
+    let context = coppice::lifecycle_context(db_path, network)?;
+    ensure_live_construction_window(lightwalletd_url, context.tip_height, name, context.params)
+        .await?;
+    let construction_height = context.tip_height.saturating_add(1);
+    let mut transaction = build_transition(db_path, network, account_uuid, name, kind, seed)?;
+    ensure_broadcast_window_open(lightwalletd_url, construction_height, name, context.params)
+        .await?;
     sync::broadcast_raw_transaction_isolated(lightwalletd_url, &transaction.raw).await?;
+    if let Some(reservation) = transaction.fee_reservation.as_mut() {
+        reservation.disarm();
+    }
     sync::decrypt_and_store_transaction(db_path, network, &transaction.raw, None)?;
     Ok(transaction.txid)
 }

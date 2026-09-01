@@ -111,6 +111,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ApiNamesResolution dco_decode_api_names_resolution(dynamic raw);
 
   @protected
+  ApiNamesRevealProposal dco_decode_api_names_reveal_proposal(dynamic raw);
+
+  @protected
   ApiNamesWalletStatus dco_decode_api_names_wallet_status(dynamic raw);
 
   @protected
@@ -972,6 +975,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ApiNamesResolution sse_decode_api_names_resolution(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ApiNamesRevealProposal sse_decode_api_names_reveal_proposal(
     SseDeserializer deserializer,
   );
 
@@ -2064,6 +2072,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_api_names_resolution(
     ApiNamesResolution self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_api_names_reveal_proposal(
+    ApiNamesRevealProposal self,
     SseSerializer serializer,
   );
 

@@ -8,11 +8,11 @@
 
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     io::{Cursor, Write},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use coppice::runtime::ApplicationMessageStatus;
@@ -327,6 +327,35 @@ pub(crate) struct NamesLifecycleContext {
     pub core_runtime_id: [u8; 32],
     pub rendezvous_receiver: [u8; 43],
     pub tip_height: u32,
+}
+
+/// Configuration and locally available replay tip for wallet-owned workflow
+/// projections.  Unlike [`NamesLifecycleContext`], this remains available
+/// while the derived Core/Names checkpoint is absent (for example after a
+/// replay error has deliberately required rebootstrap).
+pub(crate) struct ConfiguredNamesMetadata {
+    pub params: V1Parameters,
+    pub payment_network: PaymentNetwork,
+    pub tip_height: u32,
+}
+
+pub(crate) fn configured_names_metadata(
+    db_path: &str,
+    network: WalletNetwork,
+) -> Result<ConfiguredNamesMetadata, String> {
+    let stored = read_stored(&sidecar_path(db_path))?
+        .ok_or_else(|| "Names is not configured".to_string())?;
+    let config = stored.config.clone();
+    let host = NamesWalletHost::from_stored(network, stored)?;
+    Ok(ConfiguredNamesMetadata {
+        params: config.names,
+        payment_network: config.payment_network(),
+        tip_height: host.map(|host| host.tip_height()).unwrap_or(0),
+    })
+}
+
+pub(crate) fn is_configured(db_path: &str) -> Result<bool, String> {
+    Ok(read_stored(&sidecar_path(db_path))?.is_some())
 }
 
 pub(crate) fn accepted_commit(
@@ -851,23 +880,27 @@ pub(crate) fn configure(
         rendezvous_receiver_hex,
     )?;
     let path = sidecar_path(db_path);
-    let stored = read_stored(&path)?;
-    if let Some(existing) = stored {
-        if existing.config != config {
-            return Err("cannot change Names deployment configuration while state exists".into());
+    with_sidecar_lock(&path, || {
+        let stored = read_stored(&path)?;
+        if let Some(existing) = stored {
+            if existing.config != config {
+                return Err(
+                    "cannot change Names deployment configuration while state exists".into(),
+                );
+            }
+            if let Some(host) = NamesWalletHost::from_stored(network, existing)? {
+                return Ok(host.status());
+            }
         }
-        if let Some(host) = NamesWalletHost::from_stored(network, existing)? {
-            return Ok(host.status());
-        }
-    }
-    write_stored(&path, &StoredNamesWallet::configured(config.clone()))?;
-    Ok(NamesWalletStatus {
-        state: "needs_bootstrap".into(),
-        message: "exact-name resolution is available; canonical bootstrap is required for complete Names state".into(),
-        configured: true,
-        tip_height: 0,
-        names_activation_height: u64::from(config.names.activation_height),
-        oldest_rewind_height: 0,
+        write_stored(&path, &StoredNamesWallet::configured(config.clone()))?;
+        Ok(NamesWalletStatus {
+            state: "needs_bootstrap".into(),
+            message: "exact-name resolution is available; canonical bootstrap is required for complete Names state".into(),
+            configured: true,
+            tip_height: 0,
+            names_activation_height: u64::from(config.names.activation_height),
+            oldest_rewind_height: 0,
+        })
     })
 }
 
@@ -933,14 +966,19 @@ pub(crate) fn store_registration(
     registration: StoredRegistration,
 ) -> Result<(), String> {
     let path = sidecar_path(db_path);
-    let mut stored = read_stored(&path)?.ok_or_else(|| "Names is not configured".to_string())?;
-    if stored.registrations.iter().any(|existing| {
-        existing.account_uuid == registration.account_uuid && existing.name == registration.name
-    }) {
-        return Err("this wallet account already has a registration workflow for that name".into());
-    }
-    stored.registrations.push(registration);
-    write_stored(&path, &stored)
+    with_sidecar_lock(&path, || {
+        let mut stored =
+            read_stored(&path)?.ok_or_else(|| "Names is not configured".to_string())?;
+        if stored.registrations.iter().any(|existing| {
+            existing.account_uuid == registration.account_uuid && existing.name == registration.name
+        }) {
+            return Err(
+                "this wallet account already has a registration workflow for that name".into(),
+            );
+        }
+        stored.registrations.push(registration);
+        write_stored(&path, &stored)
+    })
 }
 
 pub(crate) fn registrations(db_path: &str) -> Result<Vec<StoredRegistration>, String> {
@@ -966,16 +1004,32 @@ pub(crate) fn replace_registration(
     registration: StoredRegistration,
 ) -> Result<(), String> {
     let path = sidecar_path(db_path);
-    let mut stored = read_stored(&path)?.ok_or_else(|| "Names is not configured".to_string())?;
-    let existing = stored
-        .registrations
-        .iter_mut()
-        .find(|existing| {
-            existing.account_uuid == registration.account_uuid && existing.name == registration.name
-        })
-        .ok_or_else(|| "Names registration workflow is unavailable".to_string())?;
-    *existing = registration;
-    write_stored(&path, &stored)
+    with_sidecar_lock(&path, || {
+        let mut stored =
+            read_stored(&path)?.ok_or_else(|| "Names is not configured".to_string())?;
+        let existing = stored
+            .registrations
+            .iter_mut()
+            .find(|existing| {
+                existing.account_uuid == registration.account_uuid
+                    && existing.name == registration.name
+            })
+            .ok_or_else(|| "Names registration workflow is unavailable".to_string())?;
+        *existing = registration;
+        write_stored(&path, &stored)
+    })
+}
+
+/// A broadcast REVEAL whose COMMIT is still pending is in flight, not
+/// restartable: keep the workflow in `reveal_broadcast` until the reveal is
+/// mined (the canonical head appears) or the COMMIT TTL passes (the reveal
+/// expired in the mempool and the workflow becomes `commit_expired`).
+fn reveal_in_flight(registration: &StoredRegistration, tip: u32, commit_ttl_blocks: u32) -> bool {
+    registration.phase == "reveal_broadcast"
+        && registration.reveal_txid.is_some()
+        && registration
+            .commit_height
+            .is_some_and(|height| height.saturating_add(commit_ttl_blocks) > tip)
 }
 
 pub(crate) fn managed_registrations(
@@ -1014,14 +1068,20 @@ pub(crate) fn managed_registrations(
                 }
             }
             if let Some(commit) = host.runtime.applications().pending(registration.commitment) {
-                registration.phase = "commit_accepted".to_string();
-                registration.commit_height = Some(commit.position.height);
-            } else if registration.phase == "commit_accepted"
-                && registration.commit_height.is_some_and(|height| {
-                    height.saturating_add(host.params().commit_ttl_blocks)
-                        <= host.runtime.tip().height
-                })
-            {
+                if !reveal_in_flight(
+                    registration,
+                    host.runtime.tip().height,
+                    host.params().commit_ttl_blocks,
+                ) {
+                    registration.phase = "commit_accepted".to_string();
+                    registration.commit_height = Some(commit.position.height);
+                }
+            } else if matches!(
+                registration.phase.as_str(),
+                "commit_accepted" | "reveal_broadcast"
+            ) && registration.commit_height.is_some_and(|height| {
+                height.saturating_add(host.params().commit_ttl_blocks) <= host.runtime.tip().height
+            }) {
                 registration.phase = "commit_expired".to_string();
             }
         }
@@ -1035,19 +1095,21 @@ pub(crate) fn take_cancelled_registration(
     send_flow_id: &str,
 ) -> Result<Option<StoredRegistration>, String> {
     let path = sidecar_path(db_path);
-    let Some(mut stored) = read_stored(&path)? else {
-        return Ok(None);
-    };
-    let Some(index) = stored
-        .registrations
-        .iter()
-        .position(|registration| registration.send_flow_id.as_deref() == Some(send_flow_id))
-    else {
-        return Ok(None);
-    };
-    let registration = stored.registrations.remove(index);
-    write_stored(&path, &stored)?;
-    Ok(Some(registration))
+    with_sidecar_lock(&path, || {
+        let Some(mut stored) = read_stored(&path)? else {
+            return Ok(None);
+        };
+        let Some(index) = stored
+            .registrations
+            .iter()
+            .position(|registration| registration.send_flow_id.as_deref() == Some(send_flow_id))
+        else {
+            return Ok(None);
+        };
+        let registration = stored.registrations.remove(index);
+        write_stored(&path, &stored)?;
+        Ok(Some(registration))
+    })
 }
 
 pub(crate) fn take_registration_workflow(
@@ -1056,17 +1118,19 @@ pub(crate) fn take_registration_workflow(
     name: &str,
 ) -> Result<Option<StoredRegistration>, String> {
     let path = sidecar_path(db_path);
-    let Some(mut stored) = read_stored(&path)? else {
-        return Ok(None);
-    };
-    let Some(index) = stored.registrations.iter().position(|registration| {
-        registration.account_uuid == account_uuid && registration.name == name
-    }) else {
-        return Ok(None);
-    };
-    let registration = stored.registrations.remove(index);
-    write_stored(&path, &stored)?;
-    Ok(Some(registration))
+    with_sidecar_lock(&path, || {
+        let Some(mut stored) = read_stored(&path)? else {
+            return Ok(None);
+        };
+        let Some(index) = stored.registrations.iter().position(|registration| {
+            registration.account_uuid == account_uuid && registration.name == name
+        }) else {
+            return Ok(None);
+        };
+        let registration = stored.registrations.remove(index);
+        write_stored(&path, &stored)?;
+        Ok(Some(registration))
+    })
 }
 
 pub(crate) fn record_reveal_broadcast(
@@ -1076,16 +1140,21 @@ pub(crate) fn record_reveal_broadcast(
     txid: [u8; 32],
 ) -> Result<(), String> {
     let path = sidecar_path(db_path);
-    let mut stored = read_stored(&path)?.ok_or_else(|| "Names is not configured".to_string())?;
-    let registration = stored
-        .registrations
-        .iter_mut()
-        .find(|registration| registration.account_uuid == account_uuid && registration.name == name)
-        .ok_or_else(|| "Names registration workflow is unavailable".to_string())?;
-    registration.phase = "reveal_broadcast".to_string();
-    registration.reveal_txid = Some(txid);
-    registration.send_flow_id = None;
-    write_stored(&path, &stored)
+    with_sidecar_lock(&path, || {
+        let mut stored =
+            read_stored(&path)?.ok_or_else(|| "Names is not configured".to_string())?;
+        let registration = stored
+            .registrations
+            .iter_mut()
+            .find(|registration| {
+                registration.account_uuid == account_uuid && registration.name == name
+            })
+            .ok_or_else(|| "Names registration workflow is unavailable".to_string())?;
+        registration.phase = "reveal_broadcast".to_string();
+        registration.reveal_txid = Some(txid);
+        registration.send_flow_id = None;
+        write_stored(&path, &stored)
+    })
 }
 
 /// Records that the ordinary wallet send path broadcast a Names COMMIT.
@@ -1097,17 +1166,20 @@ pub(crate) fn record_commit_broadcast(
     txid: [u8; 32],
 ) -> Result<(), String> {
     let path = sidecar_path(db_path);
-    let mut stored = read_stored(&path)?.ok_or_else(|| "Names is not configured".to_string())?;
-    let Some(registration) = stored
-        .registrations
-        .iter_mut()
-        .find(|registration| registration.send_flow_id.as_deref() == Some(send_flow_id))
-    else {
-        return Ok(());
-    };
-    registration.phase = "commit_broadcast".to_string();
-    registration.commit_txid = Some(txid);
-    write_stored(&path, &stored)
+    with_sidecar_lock(&path, || {
+        let mut stored =
+            read_stored(&path)?.ok_or_else(|| "Names is not configured".to_string())?;
+        let Some(registration) = stored
+            .registrations
+            .iter_mut()
+            .find(|registration| registration.send_flow_id.as_deref() == Some(send_flow_id))
+        else {
+            return Ok(());
+        };
+        registration.phase = "commit_broadcast".to_string();
+        registration.commit_txid = Some(txid);
+        write_stored(&path, &stored)
+    })
 }
 
 pub(crate) async fn bootstrap(
@@ -1172,13 +1244,7 @@ pub(crate) async fn bootstrap(
                 .await
                 .map_err(|error| error.to_string())?;
         if canonical_tip_hash.0 != host_tip.block_hash {
-            write_stored(
-                &path,
-                &StoredNamesWallet::configured_preserving_local(
-                    host.config.clone(),
-                    host.registrations.clone(),
-                ),
-            )?;
+            write_configured_marker(&path, &host.config, &host.registrations)?;
             return Err(
                 "persisted Names tip conflicts with lightwalletd; rebootstrap is required".into(),
             );
@@ -1209,13 +1275,7 @@ pub(crate) async fn bootstrap(
             .await
             .map_err(|error| error.to_string())?;
     if canonical_tip_hash.0 != host.runtime.tip().block_hash {
-        write_stored(
-            &path,
-            &StoredNamesWallet::configured_preserving_local(
-                host.config.clone(),
-                host.registrations.clone(),
-            ),
-        )?;
+        write_configured_marker(&path, &host.config, &host.registrations)?;
         return Err("bootstrap tip changed or failed canonical identity check".into());
     }
     Ok(host.status())
@@ -1281,31 +1341,64 @@ pub(crate) fn persist_for_sync(db_path: &str, host: &NamesWalletHost) -> Result<
     persist_host_preserving_workflows(&sidecar_path(db_path), host)
 }
 
+/// Writes a configured/no-snapshot marker without replacing newer workflow
+/// metadata with the caller's potentially stale host snapshot.
+fn write_configured_marker(
+    path: &Path,
+    config: &NamesWalletConfig,
+    fallback_registrations: &[StoredRegistration],
+) -> Result<(), String> {
+    with_sidecar_lock(path, || {
+        let registrations = match read_stored(path)? {
+            Some(current) => {
+                if current.config != *config {
+                    return Err("Names configuration changed while writing marker".to_string());
+                }
+                current.registrations
+            }
+            None => fallback_registrations.to_vec(),
+        };
+        write_stored(
+            path,
+            &StoredNamesWallet::configured_preserving_local(config.clone(), registrations),
+        )
+    })
+}
+
 fn persist_host_preserving_workflows(path: &Path, host: &NamesWalletHost) -> Result<(), String> {
-    let mut checkpoint = host.to_stored()?;
-    // Sync and explicit bootstrap can run while the UI starts or advances a
-    // registration. Runtime snapshots are derived state; wallet workflows are
-    // local custody metadata and the latest durable copy must win.
-    if let Some(current) = read_stored(path)? {
-        if current.config != checkpoint.config {
-            return Err("Names configuration changed while persisting replay state".to_string());
-        }
-        checkpoint.registrations = current.registrations;
-        for registration in &mut checkpoint.registrations {
-            if let Some(commit) = host.runtime.applications().pending(registration.commitment) {
-                registration.phase = "commit_accepted".to_string();
-                registration.commit_height = Some(commit.position.height);
-            } else if registration.phase == "commit_accepted"
-                && registration.commit_height.is_some_and(|height| {
+    with_sidecar_lock(path, || {
+        let mut checkpoint = host.to_stored()?;
+        // Sync and explicit bootstrap can run while the UI starts or advances a
+        // registration. Runtime snapshots are derived state; wallet workflows are
+        // local custody metadata and the latest durable copy must win.
+        if let Some(current) = read_stored(path)? {
+            if current.config != checkpoint.config {
+                return Err("Names configuration changed while persisting replay state".to_string());
+            }
+            checkpoint.registrations = current.registrations;
+            for registration in &mut checkpoint.registrations {
+                if let Some(commit) = host.runtime.applications().pending(registration.commitment) {
+                    if !reveal_in_flight(
+                        registration,
+                        host.runtime.tip().height,
+                        host.params().commit_ttl_blocks,
+                    ) {
+                        registration.phase = "commit_accepted".to_string();
+                        registration.commit_height = Some(commit.position.height);
+                    }
+                } else if matches!(
+                    registration.phase.as_str(),
+                    "commit_accepted" | "reveal_broadcast"
+                ) && registration.commit_height.is_some_and(|height| {
                     height.saturating_add(host.params().commit_ttl_blocks)
                         <= host.runtime.tip().height
-                })
-            {
-                registration.phase = "commit_expired".to_string();
+                }) {
+                    registration.phase = "commit_expired".to_string();
+                }
             }
         }
-    }
-    write_stored(path, &checkpoint)
+        write_stored(path, &checkpoint)
+    })
 }
 
 /// A persisted application checkpoint contains no undo journal. If a wallet
@@ -1328,13 +1421,8 @@ pub(crate) fn invalidate_after_reorg(
                     "[{}] Names host rewind persisted state failed; requiring rebootstrap: {error}",
                     super::sync_engine::elapsed()
                 );
-                let _ = write_stored(
-                    &sidecar_path(db_path),
-                    &StoredNamesWallet::configured_preserving_local(
-                        host.config.clone(),
-                        host.registrations.clone(),
-                    ),
-                );
+                let path = sidecar_path(db_path);
+                let _ = write_configured_marker(&path, &host.config, &host.registrations);
             } else {
                 *hosts = Some(host);
             }
@@ -1344,13 +1432,10 @@ pub(crate) fn invalidate_after_reorg(
                 "[{}] Names host cannot rewind across wallet reorg ({error}); requiring rebootstrap",
                 super::sync_engine::elapsed()
             );
-            if let Err(write_error) = write_stored(
-                &sidecar_path(db_path),
-                &StoredNamesWallet::configured_preserving_local(
-                    host.config.clone(),
-                    host.registrations.clone(),
-                ),
-            ) {
+            let path = sidecar_path(db_path);
+            if let Err(write_error) =
+                write_configured_marker(&path, &host.config, &host.registrations)
+            {
                 log::error!(
                     "[{}] failed to persist Names rebootstrap marker: {write_error}",
                     super::sync_engine::elapsed()
@@ -1366,13 +1451,8 @@ pub(crate) fn disable_after_error(db_path: &str, hosts: &mut Option<NamesWalletH
     let Some(host) = hosts.take() else {
         return;
     };
-    if let Err(error) = write_stored(
-        &sidecar_path(db_path),
-        &StoredNamesWallet::configured_preserving_local(
-            host.config.clone(),
-            host.registrations.clone(),
-        ),
-    ) {
+    let path = sidecar_path(db_path);
+    if let Err(error) = write_configured_marker(&path, &host.config, &host.registrations) {
         log::error!(
             "[{}] failed to persist Names disabled marker: {error}",
             super::sync_engine::elapsed()
@@ -1715,6 +1795,24 @@ fn decode_candidate_operations(
 
 fn sidecar_path(db_path: &str) -> PathBuf {
     PathBuf::from(format!("{db_path}{STORE_SUFFIX}"))
+}
+
+/// Serializes read-modify-write operations for one Names sidecar while
+/// allowing unrelated wallet sidecars to proceed independently.
+fn with_sidecar_lock<T>(path: &Path, operation: impl FnOnce() -> T) -> T {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let lock = {
+        let mut locks = LOCKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(path.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    operation()
 }
 
 fn read_stored(path: &Path) -> Result<Option<StoredNamesWallet>, String> {

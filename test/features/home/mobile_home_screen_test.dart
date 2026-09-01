@@ -327,9 +327,12 @@ Widget _app(
 }
 
 SyncState _syncedState({
+  BigInt? saplingBalance,
+  BigInt? saplingLockedBalance,
   BigInt? orchardBalance,
   BigInt? orchardLockedBalance,
   BigInt? ironwoodBalance,
+  BigInt? ironwoodLockedBalance,
   BigInt? ironwoodPendingBalance,
   BigInt? transparentBalance,
   int scannedHeight = 0,
@@ -339,9 +342,12 @@ SyncState _syncedState({
   accountUuid: 'account-1',
   hasAccountScopedData: true,
   percentage: 1.0,
+  saplingBalance: saplingBalance ?? BigInt.zero,
+  saplingLockedBalance: saplingLockedBalance ?? BigInt.zero,
   orchardBalance: orchardBalance ?? BigInt.zero,
   orchardLockedBalance: orchardLockedBalance ?? BigInt.zero,
   ironwoodBalance: ironwoodBalance ?? BigInt.zero,
+  ironwoodLockedBalance: ironwoodLockedBalance ?? BigInt.zero,
   ironwoodPendingBalance: ironwoodPendingBalance ?? BigInt.zero,
   transparentBalance: transparentBalance ?? BigInt.zero,
   scannedHeight: scannedHeight,
@@ -885,6 +891,18 @@ void main() {
     await tester.pump();
 
     expect(find.textContaining('3 ZEC', findRichText: true), findsOneWidget);
+  });
+
+  testWidgets('shows locked Ironwood holdings while they remain unspendable', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(_syncedState(ironwoodLockedBalance: BigInt.from(100000000))),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.textContaining('1 ZEC', findRichText: true), findsOneWidget);
   });
 
   testWidgets('shows the Ironwood home card state without hiding actions', (

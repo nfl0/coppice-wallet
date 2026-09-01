@@ -192,6 +192,7 @@ void main() {
     expect(merged.displayOrchardLockedBalance, BigInt.zero);
     expect(merged.displaySpendableBalance, BigInt.from(50));
     expect(merged.displayIronwoodBalance, BigInt.zero);
+    expect(merged.displayIronwoodLockedBalance, BigInt.zero);
     expect(
       merged.displaySpendableFreshness,
       SpendableBalanceFreshness.lastCompletedSync,
@@ -209,6 +210,7 @@ void main() {
       displaySpendableBalance: BigInt.from(90),
       ironwoodBalance: BigInt.zero,
       displayIronwoodBalance: BigInt.from(40),
+      displayIronwoodLockedBalance: BigInt.from(6),
       ironwoodPendingBalance: BigInt.zero,
       displayIronwoodPendingBalance: BigInt.from(5),
       orchardBalance: BigInt.zero,
@@ -239,13 +241,14 @@ void main() {
         orchardLocked: BigInt.from(7),
         ironwood: BigInt.from(42),
         spendable: BigInt.from(45),
-        total: BigInt.from(45),
+        total: BigInt.from(52),
       ),
       syncComplete: true,
     );
 
     expect(syncing.ironwoodBalance, BigInt.zero);
     expect(syncing.displayIronwoodBalance, BigInt.from(40));
+    expect(syncing.displayIronwoodLockedBalance, BigInt.from(6));
     expect(syncing.displayIronwoodPendingBalance, BigInt.from(5));
     expect(syncing.displayOrchardBalance, BigInt.from(45));
     expect(syncing.displayOrchardPendingBalance, BigInt.from(5));
@@ -266,8 +269,8 @@ void main() {
     expect(completed.displayOrchardLockedBalance, BigInt.from(7));
     expect(completed.displayOrchardHoldingsBalance, BigInt.from(10));
     expect(completed.displaySpendableBalance, BigInt.from(45));
-    expect(completed.displayShieldedBalance, BigInt.from(45));
-    expect(completed.displayTotalBalance, BigInt.from(45));
+    expect(completed.displayShieldedBalance, BigInt.from(52));
+    expect(completed.displayTotalBalance, BigInt.from(52));
     expect(
       completed.displaySpendableFreshness,
       SpendableBalanceFreshness.authoritative,

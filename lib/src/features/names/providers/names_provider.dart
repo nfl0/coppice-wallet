@@ -4,7 +4,6 @@ import '../../../../main.dart' show log;
 import '../../../core/storage/wallet_paths.dart';
 import '../../../providers/account_provider.dart';
 import '../../../providers/rpc_endpoint_provider.dart';
-import '../../../providers/sync_provider.dart';
 import '../../../rust/api/names.dart' as rust_names;
 import '../../send/services/send_flow.dart';
 import '../models/names_deployment.dart';
@@ -75,6 +74,13 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
   @override
   NamesRegistrationState build() => const NamesRegistrationState();
 
+  /// Clears the UI's completed workflow selection while keeping the latest
+  /// bond inventory. A wallet can register another name after a prior one
+  /// reaches the active state.
+  void resetDraft() {
+    state = NamesRegistrationState(bondStatus: state.bondStatus);
+  }
+
   void resumeDraft({
     required String name,
     required String paymentAddress,
@@ -108,7 +114,16 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
       return status;
     } catch (error) {
       log('Names: bond inventory failed: $error');
-      state = NamesRegistrationState(error: _friendlyRegistrationError(error));
+      // A transient sync/SQLite error must not erase a durable registration
+      // draft. Keep the phase so the next refresh can expose COMMIT once the
+      // exact bond has been reserved.
+      state = NamesRegistrationState(
+        bondStatus: state.bondStatus,
+        draftName: state.draftName,
+        draftPaymentAddress: state.draftPaymentAddress,
+        draftPhase: state.draftPhase,
+        error: _friendlyRegistrationError(error),
+      );
       return null;
     }
   }
@@ -313,9 +328,12 @@ final managedNamesProvider =
 
 class ManagedNamesNotifier
     extends AsyncNotifier<List<rust_names.ApiManagedName>> {
+  String? _lastRevealError;
+
+  String? get lastRevealError => _lastRevealError;
+
   @override
   Future<List<rust_names.ApiManagedName>> build() async {
-    ref.watch(syncProvider);
     final accountUuid = ref.watch(accountProvider).value?.activeAccountUuid;
     if (accountUuid == null) return const [];
     final endpoint = ref.watch(rpcEndpointProvider);
@@ -369,6 +387,65 @@ class ManagedNamesNotifier
     } catch (error) {
       log('Names: REVEAL failed: $error');
       return _friendlyRegistrationError(error);
+    }
+  }
+
+  /// Builds the reviewed Names REVEAL capability without broadcasting it.
+  /// The returned args enter the same send review/status flow as ordinary
+  /// wallet sends; no background scheduler is involved.
+  Future<SendReviewArgs?> beginReveal(String name) async {
+    _lastRevealError = null;
+    final account = ref.read(accountProvider).value;
+    final accountUuid = account?.activeAccountUuid;
+    if (accountUuid == null) {
+      _lastRevealError = 'Unlock your wallet first.';
+      return null;
+    }
+    final accountNotifier = ref.read(accountProvider.notifier);
+    if (accountNotifier.isHardwareAccount(accountUuid)) {
+      _lastRevealError = 'Names REVEAL currently requires a software account.';
+      return null;
+    }
+    final mnemonicBytes = await accountNotifier.getMnemonicBytesForAccount(
+      accountUuid,
+    );
+    if (mnemonicBytes == null || mnemonicBytes.isEmpty) {
+      _lastRevealError = 'The selected account credential is unavailable.';
+      return null;
+    }
+    final endpoint = ref.read(rpcEndpointProvider);
+    final sendFlowId = newSendFlowId();
+    try {
+      late final Future<rust_names.ApiNamesRevealProposal> proposalFuture;
+      try {
+        proposalFuture = rust_names.beginNamesV1Reveal(
+          dbPath: await getWalletDbPath(),
+          lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
+          network: endpoint.networkName,
+          accountUuid: accountUuid,
+          sendFlowId: sendFlowId,
+          name: name,
+          mnemonicBytes: mnemonicBytes,
+        );
+      } finally {
+        mnemonicBytes.fillRange(0, mnemonicBytes.length, 0);
+      }
+      final proposal = await proposalFuture;
+      return SendReviewArgs(
+        proposalId: proposal.proposalId,
+        sendFlowId: sendFlowId,
+        proposalAccountUuid: accountUuid,
+        address: 'Coppice Names REVEAL',
+        addressType: 'unified',
+        amountZatoshi: BigInt.one,
+        feeZatoshi: proposal.feeZatoshi,
+        needsSaplingParams: false,
+        memo: 'Reveal ${name.trim().toLowerCase()}',
+      );
+    } catch (error) {
+      log('Names: REVEAL proposal failed: $error');
+      _lastRevealError = _friendlyRegistrationError(error);
+      return null;
     }
   }
 
@@ -440,9 +517,6 @@ class NamesStatusNotifier
     extends AsyncNotifier<rust_names.ApiNamesWalletStatus?> {
   @override
   Future<rust_names.ApiNamesWalletStatus?> build() async {
-    // The Names runtime is advanced by accepted wallet-sync batches. This
-    // dependency makes the tab's displayed tip advance with the wallet.
-    ref.watch(syncProvider);
     final accountUuid = ref.watch(accountProvider).value?.activeAccountUuid;
     if (accountUuid == null) return null;
     final endpoint = ref.watch(rpcEndpointProvider);

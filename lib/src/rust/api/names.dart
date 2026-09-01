@@ -129,6 +129,27 @@ Future<ApiNamesCommitProposal> beginNamesV1Registration({
   mnemonicBytes: mnemonicBytes,
 );
 
+/// Builds and signs a Names REVEAL for the exact scheduled anchor, but does
+/// not broadcast. Execution is later routed through the ordinary proposal
+/// review/confirmation entrypoint.
+Future<ApiNamesRevealProposal> beginNamesV1Reveal({
+  required String dbPath,
+  required String lightwalletdUrl,
+  required String network,
+  required String accountUuid,
+  required String sendFlowId,
+  required String name,
+  required List<int> mnemonicBytes,
+}) => RustLib.instance.api.crateApiNamesBeginNamesV1Reveal(
+  dbPath: dbPath,
+  lightwalletdUrl: lightwalletdUrl,
+  network: network,
+  accountUuid: accountUuid,
+  sendFlowId: sendFlowId,
+  name: name,
+  mnemonicBytes: mnemonicBytes,
+);
+
 /// Proves and broadcasts REVEAL after the runtime has authenticated the exact
 /// accepted COMMIT and the canonical schedule reaches this name's anchor.
 Future<Uint8List> revealNamesV1Registration({
@@ -386,6 +407,28 @@ class ApiNamesResolution {
           tailBlocksScanned == other.tailBlocksScanned &&
           lineageBlockProbes == other.lineageBlockProbes &&
           predecessorChainSteps == other.predecessorChainSteps;
+}
+
+/// Reviewed REVEAL proposal backed by an atomically consumed Rust capability.
+class ApiNamesRevealProposal {
+  final BigInt proposalId;
+  final BigInt feeZatoshi;
+
+  const ApiNamesRevealProposal({
+    required this.proposalId,
+    required this.feeZatoshi,
+  });
+
+  @override
+  int get hashCode => proposalId.hashCode ^ feeZatoshi.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ApiNamesRevealProposal &&
+          runtimeType == other.runtimeType &&
+          proposalId == other.proposalId &&
+          feeZatoshi == other.feeZatoshi;
 }
 
 class ApiNamesWalletStatus {

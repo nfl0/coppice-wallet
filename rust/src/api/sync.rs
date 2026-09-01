@@ -1079,11 +1079,25 @@ pub fn execute_proposal(
     output_params_path: Option<String>,
 ) -> Result<ExecuteProposalResult, String> {
     catch(|| {
+        let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+        if let Some(result) = rt.block_on(wallet_sync::try_execute_names_reveal_proposal(
+            &db_path,
+            &lightwalletd_url,
+            proposal_id,
+            &send_flow_id,
+        ))? {
+            return Ok(ExecuteProposalResult {
+                txids: result.txids,
+                status: result.status,
+                broadcasted_count: result.broadcasted_count,
+                total_count: result.total_count,
+                message: result.message,
+            });
+        }
         let mnemonic_bytes = Zeroizing::new(mnemonic_bytes);
         let seed = keys::mnemonic_bytes_to_seed(mnemonic_bytes.as_slice())?;
         drop(mnemonic_bytes);
 
-        let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
         let r = rt.block_on(wallet_sync::execute_proposal(
             &db_path,
             &lightwalletd_url,
@@ -1130,8 +1144,22 @@ pub fn execute_proposal_with_macos_stored_mnemonic(
     output_params_path: Option<String>,
 ) -> Result<ExecuteProposalResult, String> {
     catch(|| {
-        let password = Zeroizing::new(password.into_bytes());
         let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
+        if let Some(result) = rt.block_on(wallet_sync::try_execute_names_reveal_proposal(
+            &db_path,
+            &lightwalletd_url,
+            proposal_id,
+            &send_flow_id,
+        ))? {
+            return Ok(ExecuteProposalResult {
+                txids: result.txids,
+                status: result.status,
+                broadcasted_count: result.broadcasted_count,
+                total_count: result.total_count,
+                message: result.message,
+            });
+        }
+        let password = Zeroizing::new(password.into_bytes());
         let r = rt.block_on(wallet_sync::execute_proposal_with_seed_loader(
             &db_path,
             &lightwalletd_url,

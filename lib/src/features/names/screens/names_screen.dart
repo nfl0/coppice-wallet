@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -14,6 +16,7 @@ import '../../../rust/api/names.dart' as rust_names;
 import '../../../providers/account_provider.dart';
 import '../../../providers/sync_provider.dart';
 import '../../send/models/send_prefill_args.dart';
+import '../../send/services/send_flow.dart' show discardSendProposal;
 import '../models/names_deployment.dart';
 import '../providers/names_provider.dart';
 import '../services/zec_name_resolution.dart';
@@ -71,10 +74,15 @@ class _NamesViewState extends ConsumerState<NamesView> {
       if (registration.draftPaymentAddress != null) {
         _registrationAddressController.text = registration.draftPaymentAddress!;
       }
-      final notifier = ref.read(namesRegistrationProvider.notifier);
-      notifier.refreshBondStatus();
-      notifier.refreshDraftPhase();
+      unawaited(_refreshRegistrationState());
     });
+  }
+
+  Future<void> _refreshRegistrationState() async {
+    final notifier = ref.read(namesRegistrationProvider.notifier);
+    await notifier.refreshBondStatus();
+    if (!mounted) return;
+    await notifier.refreshDraftPhase();
   }
 
   @override
@@ -88,6 +96,14 @@ class _NamesViewState extends ConsumerState<NamesView> {
 
   void _handleNameChanged() {
     if (mounted) setState(() {});
+  }
+
+  Future<void> _refreshNamesAfterCompletedSync() async {
+    await ref.read(namesStatusProvider.notifier).refresh();
+    if (!mounted) return;
+    await ref.read(managedNamesProvider.notifier).refresh();
+    if (!mounted) return;
+    await ref.read(namesRegistrationProvider.notifier).refreshDraftPhase();
   }
 
   void _resolveName() {
@@ -111,7 +127,11 @@ class _NamesViewState extends ConsumerState<NamesView> {
   Future<void> _registerName() async {
     final notifier = ref.read(namesRegistrationProvider.notifier);
     var registration = ref.read(namesRegistrationProvider);
-    if (registration.draftName == null) {
+    final enteredName = _registrationNameController.text.trim().toLowerCase();
+    if (registration.draftName == null ||
+        (registration.draftPhase == 'active' &&
+            registration.draftName != enteredName)) {
+      if (registration.draftName != null) notifier.resetDraft();
       await notifier.prepareDraft(
         name: _registrationNameController.text,
         paymentAddress: _registrationAddressController.text,
@@ -157,8 +177,38 @@ class _NamesViewState extends ConsumerState<NamesView> {
       _managedNameInFlight = name;
       _managedNameError = null;
     });
-    final error = await ref.read(managedNamesProvider.notifier).reveal(name);
+    final notifier = ref.read(managedNamesProvider.notifier);
+    String? error;
+    final review = await notifier.beginReveal(name);
+    if (review == null) {
+      error = notifier.lastRevealError;
+    } else {
+      if (!mounted) {
+        await discardSendProposal(
+          proposalId: review.proposalId,
+          sendFlowId: review.sendFlowId,
+          logContext: 'NamesReveal(disposed)',
+        );
+        return;
+      }
+      try {
+        await context.push('/send/review', extra: review);
+      } catch (routeError) {
+        // If route construction fails before SendReviewScreen can own the
+        // capability, release it through the same idempotent generic path.
+        await discardSendProposal(
+          proposalId: review.proposalId,
+          sendFlowId: review.sendFlowId,
+          logContext: 'NamesReveal(route-failure)',
+        );
+        error = routeError.toString();
+      }
+    }
     if (!mounted) return;
+    // Refresh after returning from review/status and on begin failure: the
+    // reveal window is height-bound, so countdown and lifecycle state stay in
+    // sync with the latest chain tip.
+    unawaited(ref.read(managedNamesProvider.notifier).refresh());
     setState(() {
       _managedNameInFlight = null;
       _managedNameError = error;
@@ -287,7 +337,6 @@ class _NamesViewState extends ConsumerState<NamesView> {
     ref.listen<AsyncValue<SyncState>>(syncProvider, (previous, next) {
       final sync = next.asData?.value;
       if (sync == null) return;
-      ref.read(namesRegistrationProvider.notifier).refreshDraftPhase();
       // Names replay is persisted by the Rust sync engine before it reports
       // successful completion. Explicitly refresh these independent sidecar
       // reads on that boundary: watching progress alone can otherwise leave a
@@ -296,8 +345,10 @@ class _NamesViewState extends ConsumerState<NamesView> {
       if (sync.isSyncComplete &&
           sync.lastSyncCompletedAt != null &&
           sync.lastSyncCompletedAt != previousCompletedAt) {
-        ref.invalidate(namesStatusProvider);
-        ref.invalidate(managedNamesProvider);
+        // Refresh in deterministic order: status first, then managed data,
+        // then the local draft phase. This avoids reading a sidecar while a
+        // completed wallet sync is still publishing its Names checkpoint.
+        unawaited(_refreshNamesAfterCompletedSync());
       }
     });
     final colors = context.colors;
@@ -311,6 +362,10 @@ class _NamesViewState extends ConsumerState<NamesView> {
         ? AppSpacing.md
         : AppSpacing.sm;
     final lookupAvailable = _namesLookupAvailable(statusAsync, profile);
+    final registrationAvailable = _namesRegistrationAvailable(
+      statusAsync,
+      profile,
+    );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -367,12 +422,17 @@ class _NamesViewState extends ConsumerState<NamesView> {
                   nameController: _registrationNameController,
                   addressController: _registrationAddressController,
                   state: registration,
-                  available: lookupAvailable,
+                  available: registrationAvailable,
                   onRegister: _registerName,
                 ),
                 const SizedBox(height: AppSpacing.md),
                 _ManagedNamesCard(
                   names: managedNames,
+                  bootstrapRequired:
+                      statusAsync.value?.state == 'needs_bootstrap',
+                  onBootstrap: () => ref
+                      .read(namesStatusProvider.notifier)
+                      .bootstrapFromActiveEndpoint(),
                   inFlightName: _managedNameInFlight,
                   error: _managedNameError,
                   onReveal: _revealName,
@@ -401,6 +461,13 @@ bool _namesLookupAvailable(
   final status = statusAsync.value;
   if (profile == null || status == null) return false;
   return status.state == 'ready' || status.state == 'needs_bootstrap';
+}
+
+bool _namesRegistrationAvailable(
+  AsyncValue<rust_names.ApiNamesWalletStatus?> statusAsync,
+  NamesDeploymentProfile? profile,
+) {
+  return profile != null && statusAsync.value?.state == 'ready';
 }
 
 String _namesLookupUnavailableMessage(
@@ -936,6 +1003,8 @@ class _RegistrationCard extends StatelessWidget {
 class _ManagedNamesCard extends StatelessWidget {
   const _ManagedNamesCard({
     required this.names,
+    required this.bootstrapRequired,
+    required this.onBootstrap,
     required this.inFlightName,
     required this.error,
     required this.onReveal,
@@ -946,6 +1015,8 @@ class _ManagedNamesCard extends StatelessWidget {
   });
 
   final AsyncValue<List<rust_names.ApiManagedName>> names;
+  final bool bootstrapRequired;
+  final VoidCallback onBootstrap;
   final String? inFlightName;
   final String? error;
   final ValueChanged<String> onReveal;
@@ -978,145 +1049,196 @@ class _ManagedNamesCard extends StatelessWidget {
           ],
         ),
         const SizedBox(height: AppSpacing.xs),
-        names.when(
-          loading: () => const Center(child: _InlineSpinner()),
-          error: (error, stackTrace) => Text(
-            'Managed names could not be loaded.',
-            style: AppTypography.bodySmall.copyWith(
-              color: colors.text.destructive,
-            ),
-          ),
-          data: (items) {
-            if (items.isEmpty) {
-              return Text(
-                'No registration workflows for this account.',
+        if (bootstrapRequired)
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Bootstrap Names to load registration workflows.',
                 style: AppTypography.bodySmall.copyWith(
                   color: colors.text.secondary,
                 ),
-              );
-            }
-            return Column(
-              children: items
-                  .map(
-                    (item) => Padding(
-                      padding: const EdgeInsets.only(bottom: AppSpacing.xs),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  '${item.name}.zec',
-                                  style: AppTypography.bodyMediumStrong
-                                      .copyWith(color: colors.text.primary),
-                                ),
-                                Text(
-                                  _managedPhaseLabel(item.phase),
-                                  style: AppTypography.bodySmall.copyWith(
-                                    color: colors.text.secondary,
-                                  ),
-                                ),
-                                if (item.phase == 'commit_accepted' &&
-                                    item.commitBlocksRemaining != null)
+              ),
+              const SizedBox(height: AppSpacing.xs),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: AppButton(
+                  key: const ValueKey('names_managed_bootstrap_button'),
+                  variant: AppButtonVariant.secondary,
+                  size: AppButtonSize.medium,
+                  onPressed: onBootstrap,
+                  child: const Text('Bootstrap Names'),
+                ),
+              ),
+            ],
+          )
+        else
+          names.when(
+            loading: () => const Center(child: _InlineSpinner()),
+            error: (error, stackTrace) => Text(
+              'Managed names could not be loaded.',
+              style: AppTypography.bodySmall.copyWith(
+                color: colors.text.destructive,
+              ),
+            ),
+            data: (items) {
+              if (items.isEmpty) {
+                return Text(
+                  'No registration workflows for this account.',
+                  style: AppTypography.bodySmall.copyWith(
+                    color: colors.text.secondary,
+                  ),
+                );
+              }
+              return Column(
+                children: items
+                    .map(
+                      (item) => Padding(
+                        key: ValueKey('managed_name_row_${item.name}'),
+                        padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
                                   Text(
-                                    '${item.commitBlocksRemaining} blocks remaining before COMMIT expiry '
-                                    '(height ${item.commitExpiryHeight})',
+                                    '${item.name}.zec',
+                                    style: AppTypography.bodyMediumStrong
+                                        .copyWith(color: colors.text.primary),
+                                  ),
+                                  Text(
+                                    _managedPhaseLabel(item.phase),
                                     style: AppTypography.bodySmall.copyWith(
-                                      color: colors.text.warning,
+                                      color: colors.text.secondary,
                                     ),
                                   ),
-                                if (item.phase == 'commit_accepted' &&
-                                    item.nextRevealHeight != null)
-                                  Text(
-                                    item.revealReady
-                                        ? 'REVEAL is ready for the next block.'
-                                        : 'REVEAL in ${item.revealBlocksUntil} blocks '
-                                              '(height ${item.nextRevealHeight}).',
-                                    style: AppTypography.bodySmall.copyWith(
-                                      color: item.revealReady
-                                          ? colors.text.success
-                                          : colors.text.secondary,
+                                  if (item.phase == 'commit_accepted' &&
+                                      item.commitBlocksRemaining != null)
+                                    Text(
+                                      '${item.commitBlocksRemaining} blocks remaining before COMMIT expiry '
+                                      '(height ${item.commitExpiryHeight})',
+                                      style: AppTypography.bodySmall.copyWith(
+                                        color: colors.text.warning,
+                                      ),
                                     ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                          if (item.phase == 'commit_accepted' &&
-                              item.revealReady)
-                            AppButton(
-                              key: ValueKey('names_reveal_button_${item.name}'),
-                              variant: AppButtonVariant.secondary,
-                              size: AppButtonSize.medium,
-                              onPressed: inFlightName == null
-                                  ? () => onReveal(item.name)
-                                  : null,
-                              child: inFlightName == item.name
-                                  ? const _InlineSpinner()
-                                  : const Text('Reveal now'),
-                            ),
-                          if (item.phase == 'awaiting_bond' ||
-                              item.phase == 'bond_reserved')
-                            AppButton(
-                              variant: AppButtonVariant.secondary,
-                              size: AppButtonSize.medium,
-                              onPressed: inFlightName == null
-                                  ? () => onResumeRegistration(item)
-                                  : null,
-                              child: Text(
-                                item.phase == 'bond_reserved'
-                                    ? 'Continue'
-                                    : 'Prepare bond',
+                                  if (item.phase == 'commit_accepted' &&
+                                      item.nextRevealHeight != null)
+                                    Text(
+                                      item.revealReady
+                                          ? 'REVEAL is ready for the next block.'
+                                          : 'REVEAL in ${item.revealBlocksUntil} blocks '
+                                                '(height ${item.nextRevealHeight}).',
+                                      style: AppTypography.bodySmall.copyWith(
+                                        color: item.revealReady
+                                            ? colors.text.success
+                                            : colors.text.secondary,
+                                      ),
+                                    ),
+                                ],
                               ),
                             ),
-                          if (item.phase == 'commit_proposed' ||
-                              item.phase == 'commit_broadcast' ||
-                              item.phase == 'commit_expired')
-                            AppButton(
-                              variant: AppButtonVariant.secondary,
-                              size: AppButtonSize.medium,
-                              onPressed: inFlightName == null
-                                  ? () => onDiscardRegistration(item)
-                                  : null,
-                              child: const Text('Start over'),
-                            ),
-                          if (item.phase == 'active')
-                            PopupMenuButton<String>(
-                              enabled: inFlightName == null,
-                              tooltip: 'Manage ${item.name}.zec',
-                              onSelected: (action) => onManage(item, action),
-                              itemBuilder: (context) => const [
-                                PopupMenuItem(
-                                  value: 'update',
-                                  child: Text('Update address'),
+                            if (item.phase == 'commit_accepted' &&
+                                item.revealReady)
+                              AppButton(
+                                key: ValueKey(
+                                  'names_reveal_button_${item.name}',
                                 ),
-                                PopupMenuItem(
-                                  value: 'renew',
-                                  child: Text('Renew lease'),
+                                variant: AppButtonVariant.secondary,
+                                size: AppButtonSize.medium,
+                                onPressed: inFlightName == null
+                                    ? () => onReveal(item.name)
+                                    : null,
+                                child: inFlightName == item.name
+                                    ? const _InlineSpinner()
+                                    : const Text('Reveal now'),
+                              ),
+                            if (item.phase == 'awaiting_bond' ||
+                                item.phase == 'bond_reserved')
+                              AppButton(
+                                variant: AppButtonVariant.secondary,
+                                size: AppButtonSize.medium,
+                                onPressed: inFlightName == null
+                                    ? () => onResumeRegistration(item)
+                                    : null,
+                                child: Text(
+                                  item.phase == 'bond_reserved'
+                                      ? 'Continue'
+                                      : 'Prepare bond',
                                 ),
-                                PopupMenuItem(
-                                  value: 'release',
-                                  child: Text('Release name'),
-                                ),
-                              ],
-                              child: inFlightName == item.name
-                                  ? const _InlineSpinner()
-                                  : const AppIcon(AppIcons.options),
-                            ),
-                        ],
+                              ),
+                            if (item.phase == 'commit_proposed' ||
+                                item.phase == 'commit_broadcast' ||
+                                item.phase == 'commit_expired')
+                              AppButton(
+                                variant: AppButtonVariant.secondary,
+                                size: AppButtonSize.medium,
+                                onPressed: inFlightName == null
+                                    ? () => onDiscardRegistration(item)
+                                    : null,
+                                child: const Text('Start over'),
+                              ),
+                            if (item.phase == 'active')
+                              PopupMenuButton<String>(
+                                enabled: inFlightName == null,
+                                tooltip: 'Manage ${item.name}.zec',
+                                onSelected: (action) => onManage(item, action),
+                                itemBuilder: (context) => const [
+                                  PopupMenuItem(
+                                    value: 'update',
+                                    child: Text('Update address'),
+                                  ),
+                                  PopupMenuItem(
+                                    value: 'renew',
+                                    child: Text('Renew lease'),
+                                  ),
+                                  PopupMenuItem(
+                                    value: 'release',
+                                    child: Text('Release name'),
+                                  ),
+                                ],
+                                child: inFlightName == item.name
+                                    ? const _InlineSpinner()
+                                    : const AppIcon(AppIcons.options),
+                              ),
+                          ],
+                        ),
                       ),
-                    ),
-                  )
-                  .toList(),
-            );
-          },
-        ),
+                    )
+                    .toList(),
+              );
+            },
+          ),
         if (error != null) ...[
-          const SizedBox(height: AppSpacing.xs),
-          Text(
-            error!,
-            style: AppTypography.bodySmall.copyWith(
-              color: colors.text.destructive,
+          const SizedBox(height: AppSpacing.sm),
+          Container(
+            key: const ValueKey('managed_names_error'),
+            padding: const EdgeInsets.all(AppSpacing.sm),
+            decoration: BoxDecoration(
+              color: colors.background.ground,
+              borderRadius: BorderRadius.circular(AppRadii.small),
+              border: Border.all(
+                color: colors.text.destructive.withValues(alpha: 0.4),
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                AppIcon(
+                  AppIcons.warning,
+                  size: 16,
+                  color: colors.text.destructive,
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                Expanded(
+                  child: Text(
+                    error!,
+                    style: AppTypography.bodySmall.copyWith(
+                      color: colors.text.destructive,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -1132,7 +1254,7 @@ String _managedPhaseLabel(String phase) => switch (phase) {
   'commit_broadcast' => 'COMMIT broadcast — awaiting canonical Names replay',
   'commit_accepted' => 'COMMIT accepted — REVEAL when scheduled',
   'commit_expired' => 'COMMIT expired before REVEAL',
-  'reveal_broadcast' => 'REVEAL awaiting confirmation',
+  'reveal_broadcast' => 'REVEAL broadcast — confirming at its scheduled block',
   'active' => 'Active',
   'released' => 'Released',
   'expired' => 'Lease expired',

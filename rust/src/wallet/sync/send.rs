@@ -887,8 +887,7 @@ pub(crate) fn propose_send_with_raw_memo(
                 });
             }
         };
-        let id = store.next_id;
-        store.next_id += 1;
+        let id = super::next_proposal_id(&mut store);
         store.locks.insert(
             id,
             StoredProposalLock {

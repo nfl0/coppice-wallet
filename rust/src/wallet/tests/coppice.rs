@@ -1,8 +1,9 @@
 use super::super::network::WalletNetwork;
 use super::{
-    bootstrap, compact_tx_is_rendezvous, configure, contiguous_ranges, load_for_sync, read_stored,
-    resolve_name, sidecar_path, write_stored, AcquiredCanonicalSource, NamesWalletConfig,
-    StoredNamesWallet,
+    bootstrap, compact_tx_is_rendezvous, configure, configured_names_metadata, contiguous_ranges,
+    load_for_sync, managed_registrations, read_stored, registrations, resolve_name, sidecar_path,
+    store_registration, write_configured_marker, write_stored, AcquiredCanonicalSource,
+    NamesWalletConfig, StoredNamesWallet, StoredRegistration,
 };
 use coppice_names::v1::{CanonicalBlock, CanonicalSource};
 use std::collections::BTreeMap;
@@ -100,6 +101,135 @@ fn sidecar_roundtrip_is_atomic_and_rejects_oversized_payloads() {
         .unwrap();
     oversized.set_len(65 * 1024 * 1024).unwrap();
     assert!(read_stored(&sidecar).is_err());
+}
+
+#[test]
+fn concurrent_registration_mutations_do_not_lose_each_other() {
+    let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("wallet.sqlite");
+    let sidecar = sidecar_path(db_path.to_str().unwrap());
+    write_stored(&sidecar, &StoredNamesWallet::configured(config())).unwrap();
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let mut workers = Vec::new();
+    for (name, flow) in [("first", "flow-first"), ("second", "flow-second")] {
+        let barrier = barrier.clone();
+        let db_path = db_path.to_str().unwrap().to_owned();
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            store_registration(
+                &db_path,
+                StoredRegistration {
+                    account_uuid: "account".into(),
+                    name: name.into(),
+                    record: vec![1, 2, 3],
+                    nonce: [name.as_bytes()[0]; 32],
+                    commitment: [name.as_bytes()[0]; 32],
+                    send_flow_id: Some(flow.into()),
+                    bond_txid: None,
+                    bond_output_index: None,
+                    commit_height: None,
+                    phase: "awaiting_bond".into(),
+                    commit_txid: None,
+                    reveal_txid: None,
+                },
+            )
+            .unwrap();
+        }));
+    }
+    barrier.wait();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    let stored_registrations = registrations(db_path.to_str().unwrap()).unwrap();
+    assert_eq!(stored_registrations.len(), 2);
+    assert!(stored_registrations
+        .iter()
+        .any(|registration| registration.name == "first"));
+    assert!(stored_registrations
+        .iter()
+        .any(|registration| registration.name == "second"));
+}
+
+#[test]
+fn stale_configured_marker_preserves_newer_registration_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("wallet.sqlite");
+    let sidecar = sidecar_path(db_path.to_str().unwrap());
+    let registration = StoredRegistration {
+        account_uuid: "account".into(),
+        name: "newer".into(),
+        record: vec![1, 2, 3],
+        nonce: [7; 32],
+        commitment: [8; 32],
+        send_flow_id: Some("flow".into()),
+        bond_txid: None,
+        bond_output_index: None,
+        commit_height: None,
+        phase: "awaiting_bond".into(),
+        commit_txid: None,
+        reveal_txid: None,
+    };
+    write_stored(
+        &sidecar,
+        &StoredNamesWallet {
+            format_version: 1,
+            config: config(),
+            core_snapshot: None,
+            application_snapshot: None,
+            registrations: vec![registration.clone()],
+        },
+    )
+    .unwrap();
+
+    // Simulates an old replay host attempting to write a rebootstrap marker
+    // after the UI has already persisted a newer workflow.
+    write_configured_marker(&sidecar, &config(), &[]).unwrap();
+    assert_eq!(
+        registrations(db_path.to_str().unwrap()).unwrap(),
+        vec![registration]
+    );
+}
+
+#[test]
+fn configured_metadata_and_local_workflow_survive_missing_replay_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("wallet.sqlite");
+    let db_path = db_path.to_str().unwrap();
+    let registration = StoredRegistration {
+        account_uuid: "account".into(),
+        name: "pending".into(),
+        record: vec![1, 2, 3],
+        nonce: [9; 32],
+        commitment: [8; 32],
+        send_flow_id: None,
+        bond_txid: None,
+        bond_output_index: None,
+        commit_height: None,
+        phase: "bond_reserved".into(),
+        commit_txid: None,
+        reveal_txid: None,
+    };
+    write_stored(
+        &sidecar_path(db_path),
+        &StoredNamesWallet {
+            format_version: 1,
+            config: config(),
+            core_snapshot: None,
+            application_snapshot: None,
+            registrations: vec![registration.clone()],
+        },
+    )
+    .unwrap();
+
+    let metadata = configured_names_metadata(db_path, WalletNetwork::Regtest).unwrap();
+    assert_eq!(metadata.params.commit_ttl_blocks, 15);
+    assert_eq!(metadata.tip_height, 0);
+    assert_eq!(
+        managed_registrations(db_path, WalletNetwork::Regtest, "account").unwrap(),
+        vec![registration]
+    );
 }
 
 #[test]

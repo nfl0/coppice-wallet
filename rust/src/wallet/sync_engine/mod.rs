@@ -3390,17 +3390,6 @@ async fn run_sync_impl(
                             elapsed()
                         );
                         names_host_failed = true;
-                    } else if let Err(error) =
-                        crate::wallet::names_lifecycle::reserve_pending_bonds(db_data_path, network)
-                    {
-                        // A pending draft is wallet-local workflow state. Do
-                        // not disable authenticated Names replay merely
-                        // because reserving a just-confirmed denomination
-                        // needs a later retry.
-                        log::warn!(
-                            "[{}] sync: could not reserve a pending Coppice Names bond: {error}",
-                            elapsed()
-                        );
                     }
                 } else {
                     log::debug!(
@@ -3413,6 +3402,23 @@ async fn run_sync_impl(
         }
         if names_host_failed {
             crate::wallet::coppice::disable_after_error(db_data_path, &mut names_host);
+        }
+
+        // A registration bond is wallet-local custody state. Retry it after
+        // every accepted scan batch even when the optional derived Names host
+        // is absent or was disabled above. The operation is idempotent and
+        // only advances `awaiting_bond` workflows.
+        if crate::wallet::coppice::is_configured(db_data_path).unwrap_or(false) {
+            if let Err(error) =
+                crate::wallet::names_lifecycle::reserve_pending_bonds(db_data_path, network)
+            {
+                // Keep ordinary wallet sync healthy; a later completed sync
+                // or a UI refresh can retry this wallet-owned transition.
+                log::warn!(
+                    "[{}] sync: could not reserve a pending Coppice Names bond: {error}",
+                    elapsed()
+                );
+            }
         }
 
         if migration_anchor_retention_required {

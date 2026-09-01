@@ -972,10 +972,15 @@ class _HomeContentState extends ConsumerState<_HomeContent> {
     final sendDisabled =
         migrationInProgress && sync.ironwoodBalance <= BigInt.zero;
     final shieldedBalance = migrationRequired
-        ? sync.orchardBalance + sync.orchardPendingBalance
+        ? sync.orchardBalance +
+              sync.orchardLockedBalance +
+              sync.orchardPendingBalance
         : sync.saplingBalance +
               sync.orchardBalance +
               sync.ironwoodBalance +
+              sync.saplingLockedBalance +
+              sync.orchardLockedBalance +
+              sync.ironwoodLockedBalance +
               sync.saplingPendingBalance +
               sync.orchardPendingBalance +
               sync.ironwoodPendingBalance;
