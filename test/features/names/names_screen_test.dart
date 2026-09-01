@@ -29,9 +29,6 @@ class _ReviewManagedNamesNotifier extends ManagedNamesNotifier {
       name: name,
       phase: 'commit_accepted',
       commitment: Uint8List.fromList([1, 2, 3]),
-      nextRevealHeight: BigInt.from(101),
-      revealBlocksUntil: BigInt.zero,
-      revealReady: true,
     ),
   ];
 
@@ -96,7 +93,7 @@ void main() {
     );
   });
 
-  testWidgets('eligible REVEAL enters the ordinary send review route', (
+  testWidgets('accepted REVEAL enters review without a scheduled height', (
     tester,
   ) async {
     SendReviewArgs? captured;

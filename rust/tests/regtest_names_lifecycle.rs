@@ -1,6 +1,6 @@
 //! Live regtest regression for the wallet Names registration lifecycle:
-//! funding -> configure/bootstrap -> draft -> COMMIT -> REVEAL at the
-//! scheduled anchor -> Active -> resolution. Drives the same public API
+//! funding -> configure/bootstrap -> draft -> COMMIT -> reviewed REVEAL ->
+//! Active -> resolution. Drives the same public API
 //! entrypoints the Flutter wallet calls, so a failure here reproduces
 //! user-visible behavior.
 
@@ -171,23 +171,8 @@ fn names_commit_reveal_live() {
     }
     accepted.expect("COMMIT to be accepted by canonical replay");
 
-    // Advance to the name's scheduled anchor (the UI enables REVEAL only
-    // when the next block is exactly the anchor).
-    let mut reveal_view = managed_snapshot(&db_path, &account_uuid, &name);
-    for _ in 0..20 {
-        if reveal_view.reveal_ready {
-            break;
-        }
-        mine(1);
-        sync_wallet(&db_file);
-        reveal_view = managed_snapshot(&db_path, &account_uuid, &name);
-    }
-    assert!(
-        reveal_view.reveal_ready,
-        "REVEAL anchor reached within 20 blocks"
-    );
-
-    // The exact call the wallet UI makes when the user presses "Reveal now".
+    // Once canonical replay accepts COMMIT, REVEAL can enter the ordinary
+    // review and broadcast flow immediately and remain valid until COMMIT TTL.
     let reveal_txid = names_api::reveal_names_v1_registration(
         db_path.clone(),
         LIGHTWALLETD_URL.to_string(),
@@ -196,7 +181,7 @@ fn names_commit_reveal_live() {
         name.clone(),
         mnemonic.as_bytes().to_vec(),
     )
-    .expect("reveal at the scheduled anchor");
+    .expect("reveal while the accepted COMMIT is live");
 
     mine(1);
     sync_wallet(&db_file);

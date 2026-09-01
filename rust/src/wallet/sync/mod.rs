@@ -548,8 +548,8 @@ pub(super) struct NamesRevealExecution {
     pub network: WalletNetwork,
     pub account_uuid: String,
     pub name: String,
-    pub construction_height: u32,
-    pub params: coppice_names::v1::V1Parameters,
+    pub valid_from_height: u32,
+    pub expiry_height: u32,
     pub fee_zatoshi: u64,
 }
 
@@ -787,9 +787,8 @@ pub(crate) async fn try_execute_names_reveal_proposal(
 
     if let Err(error) = crate::wallet::names_lifecycle::ensure_broadcast_window_open(
         lightwalletd_url,
-        execution.construction_height,
-        &execution.name,
-        execution.params,
+        execution.valid_from_height,
+        execution.expiry_height,
     )
     .await
     {
@@ -1165,8 +1164,8 @@ mod tests {
                 network: WalletNetwork::Regtest,
                 account_uuid: "test-account".to_string(),
                 name: "test.zec".to_string(),
-                construction_height: 123,
-                params: coppice_names::v1::V1Parameters::testing(),
+                valid_from_height: 123,
+                expiry_height: 123,
                 fee_zatoshi: 1,
             },
             NamesRevealLockMetadata { expiry_height: 123 },
@@ -1231,8 +1230,8 @@ mod tests {
                 network: WalletNetwork::Regtest,
                 account_uuid: "test-account".to_string(),
                 name: "test.zec".to_string(),
-                construction_height: 123,
-                params: coppice_names::v1::V1Parameters::testing(),
+                valid_from_height: 123,
+                expiry_height: 456,
                 fee_zatoshi: 1,
             },
             NamesRevealLockMetadata { expiry_height: 456 },
@@ -1269,8 +1268,8 @@ mod tests {
                 network: WalletNetwork::Regtest,
                 account_uuid: "test-account".to_string(),
                 name: "test.zec".to_string(),
-                construction_height: 123,
-                params: coppice_names::v1::V1Parameters::testing(),
+                valid_from_height: 123,
+                expiry_height: 123,
                 fee_zatoshi: 1,
             },
             NamesRevealLockMetadata { expiry_height: 123 },

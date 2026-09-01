@@ -590,8 +590,8 @@ pub(crate) struct NamesRevealTransaction {
     pub account_uuid: String,
     pub db_path: String,
     pub network: WalletNetwork,
-    pub construction_height: u32,
-    pub params: coppice_names::v1::V1Parameters,
+    pub valid_from_height: u32,
+    pub expiry_height: u32,
     pub fee_zatoshi: u64,
     fee_reservation: Option<NamesFeeReservation>,
 }
@@ -660,7 +660,7 @@ pub(crate) fn build_reveal(
         })
         .ok_or_else(|| "this wallet has no pending registration for that name".to_string())?;
     if registration.phase == "reveal_broadcast" && registration.reveal_txid.is_some() {
-        return Err("REVEAL is already broadcast and awaits its scheduled block".to_string());
+        return Err("REVEAL is already broadcast and awaits confirmation".to_string());
     }
     let commit =
         coppice::accepted_commit(db_path, network, registration.commitment)?.ok_or_else(|| {
@@ -671,6 +671,11 @@ pub(crate) fn build_reveal(
         .tip_height
         .checked_add(1)
         .ok_or_else(|| "Names construction height overflow".to_string())?;
+    let expiry_height = commit
+        .position
+        .height
+        .checked_add(context.params.commit_ttl_blocks)
+        .ok_or_else(|| "Names COMMIT lifetime overflow".to_string())?;
 
     let account_id = parse_account_uuid(account_uuid)?;
     let mut db = open_wallet_db(db_path, network)?;
@@ -698,24 +703,6 @@ pub(crate) fn build_reveal(
             registration.nonce,
         ),
     };
-    let name_id = intent
-        .name_id()
-        .map_err(|error| format!("derive Names name id: {error:?}"))?;
-    let target_height = coppice_names::v1::schedule::next_anchor_height(
-        name_id,
-        construction_height,
-        context.params,
-    )
-    .ok_or_else(|| "no future legal Names REVEAL height exists".to_string())?;
-    if construction_height != target_height {
-        return Err(format!(
-            "REVEAL must be built exactly at its scheduled block. The next \
-             window for this name opens at block {target_height} (wallet tip \
-             is {}). Sync to that height minus one and press Reveal again.",
-            context.tip_height
-        ));
-    }
-
     let historical_height = context.tip_height;
     let candidates = db
         .get_unspent_ironwood_notes_at_historical_height(
@@ -785,7 +772,7 @@ pub(crate) fn build_reveal(
         db.lock_outputs(
             &[funding_ref],
             funding_lock_owner,
-            BlockHeight::from_u32(construction_height.saturating_add(2)),
+            BlockHeight::from_u32(expiry_height),
         )
         .map_err(|error| format!("reserve Names REVEAL fee note: {error:?}"))
     })?;
@@ -863,7 +850,7 @@ pub(crate) fn build_reveal(
             ironwood: built,
             params: network,
             consensus_branch_id: BranchId::Nu6_3,
-            expiry_height: BlockHeight::from_u32(construction_height),
+            expiry_height: BlockHeight::from_u32(expiry_height),
             fallback_lock_time: 0,
         })
         .map_err(|error| format!("build Names REVEAL PCZT: {error:#}"))?;
@@ -949,8 +936,8 @@ pub(crate) fn build_reveal(
             account_uuid: account_uuid.to_string(),
             db_path: db_path.to_string(),
             network,
-            construction_height,
-            params: context.params,
+            valid_from_height: construction_height,
+            expiry_height,
             fee_zatoshi: fee.into_u64(),
             fee_reservation: Some(fee_reservation),
         })
@@ -991,15 +978,15 @@ fn store_reviewed_reveal_capability(
         network: transaction.network,
         account_uuid: transaction.account_uuid,
         name: transaction.name,
-        construction_height: transaction.construction_height,
-        params: transaction.params,
+        valid_from_height: transaction.valid_from_height,
+        expiry_height: transaction.expiry_height,
         fee_zatoshi: transaction.fee_zatoshi,
     };
     sync::allocate_names_reveal_capability(
         send_flow_id,
         execution,
         sync::NamesRevealLockMetadata {
-            expiry_height: u64::from(transaction.construction_height.saturating_add(2)),
+            expiry_height: u64::from(transaction.expiry_height),
         },
         sync::NamesRevealCleanup::Callbacks { release, retain },
     )
@@ -1016,15 +1003,14 @@ pub(crate) async fn begin_reviewed_reveal(
     seed: SecretVec<u8>,
 ) -> Result<NamesRevealProposal, String> {
     let context = coppice::lifecycle_context(db_path, network)?;
-    ensure_live_construction_window(lightwalletd_url, context.tip_height, name, context.params)
-        .await?;
-    let construction_height = context
-        .tip_height
-        .checked_add(1)
-        .ok_or_else(|| "Names construction height overflow".to_string())?;
+    ensure_live_construction_window(lightwalletd_url, context.tip_height).await?;
     let transaction = build_reveal(db_path, network, account_uuid, name, seed)?;
-    ensure_broadcast_window_open(lightwalletd_url, construction_height, name, context.params)
-        .await?;
+    ensure_broadcast_window_open(
+        lightwalletd_url,
+        transaction.valid_from_height,
+        transaction.expiry_height,
+    )
+    .await?;
     let fee_zatoshi = transaction.fee_zatoshi;
     let proposal_id = store_reviewed_reveal_capability(transaction, send_flow_id)?;
     Ok(NamesRevealProposal {
@@ -1044,53 +1030,47 @@ async fn live_chain_tip(lightwalletd_url: &str) -> Result<u32, String> {
     u32::try_from(tip.height).map_err(|_| "chain tip exceeds supported height".to_string())
 }
 
-/// The REVEAL/state-transition window is exactly one block at the name's
-/// scheduled anchor. The Names sidecar tip advances only during wallet sync,
-/// so it can lag the live chain tip; a transaction built from a stale tip
-/// carries an expiry in the past and is rejected by the backing node on
-/// arrival. Fails fast with the next legal window when the wallet is not
-/// current.
+/// The Names sidecar tip advances only during wallet sync, so it can lag the
+/// live chain tip. Construction needs current canonical Names state and note
+/// witnesses even though the completed REVEAL or RENEW may remain valid over
+/// later blocks. Fail fast until the wallet is current.
 async fn ensure_live_construction_window(
     lightwalletd_url: &str,
     sidecar_tip: u32,
-    name: &str,
-    params: coppice_names::v1::V1Parameters,
 ) -> Result<(), String> {
     let live_tip = live_chain_tip(lightwalletd_url).await?;
     if live_tip == sidecar_tip {
         return Ok(());
     }
-    let name_id = coppice_names::v1::state::name_id(name)
-        .map_err(|error| format!("derive Names name id: {error:?}"))?;
-    let next = coppice_names::v1::schedule::next_anchor_height(name_id, live_tip + 1, params)
-        .ok_or_else(|| "no future legal Names REVEAL height exists".to_string())?;
     Err(format!(
         "the wallet is not current with the chain tip (wallet {sidecar_tip}, \
-         chain {live_tip}); the next REVEAL window for this name opens at \
-         block {next}"
+         chain {live_tip}); sync before building the Names operation"
     ))
 }
 
-/// Re-checks the live tip right before broadcast: a block mined while the
-/// operation was being proven closes the one-block window, and broadcasting
-/// would only produce a transaction the backing node must reject as expired.
+/// Re-checks that the next possible inclusion height remains inside the
+/// operation's canonical validity window.
+fn broadcast_window_open_at_tip(live_tip: u32, valid_from_height: u32, expiry_height: u32) -> bool {
+    live_tip
+        .checked_add(1)
+        .is_some_and(|next_height| next_height >= valid_from_height && next_height <= expiry_height)
+}
+
 pub(crate) async fn ensure_broadcast_window_open(
     lightwalletd_url: &str,
-    construction_height: u32,
-    name: &str,
-    params: coppice_names::v1::V1Parameters,
+    valid_from_height: u32,
+    expiry_height: u32,
 ) -> Result<(), String> {
     let live_tip = live_chain_tip(lightwalletd_url).await?;
-    if live_tip + 1 == construction_height {
+    let next_height = live_tip
+        .checked_add(1)
+        .ok_or_else(|| "chain height overflow".to_string())?;
+    if broadcast_window_open_at_tip(live_tip, valid_from_height, expiry_height) {
         return Ok(());
     }
-    let name_id = coppice_names::v1::state::name_id(name)
-        .map_err(|error| format!("derive Names name id: {error:?}"))?;
-    let next = coppice_names::v1::schedule::next_anchor_height(name_id, live_tip + 1, params)
-        .ok_or_else(|| "no future legal Names REVEAL height exists".to_string())?;
     Err(format!(
-        "the chain advanced while the operation was being built; the next \
-         REVEAL window for this name opens at block {next}"
+        "the Names operation is outside its valid block window \
+         ({valid_from_height}..={expiry_height}; next block is {next_height})"
     ))
 }
 
@@ -1103,12 +1083,14 @@ pub(crate) async fn reveal_registration(
     seed: SecretVec<u8>,
 ) -> Result<[u8; 32], String> {
     let context = coppice::lifecycle_context(db_path, network)?;
-    ensure_live_construction_window(lightwalletd_url, context.tip_height, name, context.params)
-        .await?;
-    let construction_height = context.tip_height.saturating_add(1);
+    ensure_live_construction_window(lightwalletd_url, context.tip_height).await?;
     let mut transaction = build_reveal(db_path, network, account_uuid, name, seed)?;
-    ensure_broadcast_window_open(lightwalletd_url, construction_height, name, context.params)
-        .await?;
+    ensure_broadcast_window_open(
+        lightwalletd_url,
+        transaction.valid_from_height,
+        transaction.expiry_height,
+    )
+    .await?;
     sync::broadcast_raw_transaction_isolated(lightwalletd_url, &transaction.raw).await?;
     if let Some(reservation) = transaction.fee_reservation.as_mut() {
         reservation.disarm();
@@ -1210,6 +1192,14 @@ pub(crate) fn build_transition(
     if !predecessor.is_active_at(height) {
         return Err("the accepted name is not active at the next block".to_string());
     }
+    let expiry_height = match &kind {
+        NamesTransitionKind::Renew => predecessor
+            .data
+            .lease_expiry
+            .checked_sub(1)
+            .ok_or_else(|| "Names RENEW validity window underflow".to_string())?,
+        NamesTransitionKind::Update(_) | NamesTransitionKind::Release => height,
+    };
     let account_id = parse_account_uuid(account_uuid)?;
     let mut db = open_wallet_db(db_path, network)?;
     let account = db
@@ -1296,7 +1286,7 @@ pub(crate) fn build_transition(
         db.lock_outputs(
             &[funding_ref],
             funding_lock_owner,
-            BlockHeight::from_u32(height.saturating_add(2)),
+            BlockHeight::from_u32(expiry_height),
         )
         .map_err(|error| format!("reserve Names {} fee note: {error:?}", kind.label()))
     })?;
@@ -1374,7 +1364,7 @@ pub(crate) fn build_transition(
             ironwood: built,
             params: network,
             consensus_branch_id: BranchId::Nu6_3,
-            expiry_height: BlockHeight::from_u32(height),
+            expiry_height: BlockHeight::from_u32(expiry_height),
             fallback_lock_time: 0,
         })
         .map_err(|error| format!("build Names {} PCZT: {error:#}", kind.label()))?;
@@ -1460,8 +1450,8 @@ pub(crate) fn build_transition(
             account_uuid: account_uuid.to_string(),
             db_path: db_path.to_string(),
             network,
-            construction_height: height,
-            params: context.params,
+            valid_from_height: height,
+            expiry_height,
             fee_zatoshi: fee.into_u64(),
             fee_reservation: Some(fee_reservation),
         })
@@ -1479,16 +1469,31 @@ pub(crate) async fn execute_transition(
     seed: SecretVec<u8>,
 ) -> Result<[u8; 32], String> {
     let context = coppice::lifecycle_context(db_path, network)?;
-    ensure_live_construction_window(lightwalletd_url, context.tip_height, name, context.params)
-        .await?;
-    let construction_height = context.tip_height.saturating_add(1);
+    ensure_live_construction_window(lightwalletd_url, context.tip_height).await?;
     let mut transaction = build_transition(db_path, network, account_uuid, name, kind, seed)?;
-    ensure_broadcast_window_open(lightwalletd_url, construction_height, name, context.params)
-        .await?;
+    ensure_broadcast_window_open(
+        lightwalletd_url,
+        transaction.valid_from_height,
+        transaction.expiry_height,
+    )
+    .await?;
     sync::broadcast_raw_transaction_isolated(lightwalletd_url, &transaction.raw).await?;
     if let Some(reservation) = transaction.fee_reservation.as_mut() {
         reservation.disarm();
     }
     sync::decrypt_and_store_transaction(db_path, network, &transaction.raw, None)?;
     Ok(transaction.txid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::broadcast_window_open_at_tip;
+
+    #[test]
+    fn reviewed_names_operation_survives_block_advances_inside_its_window() {
+        assert!(broadcast_window_open_at_tip(100, 101, 115));
+        assert!(broadcast_window_open_at_tip(108, 101, 115));
+        assert!(broadcast_window_open_at_tip(114, 101, 115));
+        assert!(!broadcast_window_open_at_tip(115, 101, 115));
+    }
 }

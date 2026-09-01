@@ -70,9 +70,6 @@ pub struct ApiManagedName {
     pub commit_height: Option<u64>,
     pub commit_expiry_height: Option<u64>,
     pub commit_blocks_remaining: Option<u64>,
-    pub next_reveal_height: Option<u64>,
-    pub reveal_blocks_until: Option<u64>,
-    pub reveal_ready: bool,
 }
 
 impl From<coppice::NamesWalletStatus> for ApiNamesWalletStatus {
@@ -211,20 +208,6 @@ pub fn get_managed_names_v1(
                 .map(|height| height.saturating_add(commit_ttl_blocks));
             let commit_blocks_remaining =
                 commit_expiry_height.map(|expiry| expiry.saturating_sub(current_tip));
-            let construction_height = current_tip.saturating_add(1);
-            let next_reveal_height = if registration.phase == "commit_accepted" {
-                coppice_names::v1::state::name_id(&registration.name)
-                    .ok()
-                    .and_then(|name_id| {
-                        coppice_names::v1::schedule::next_anchor_height(
-                            name_id,
-                            construction_height,
-                            metadata.params,
-                        )
-                    })
-            } else {
-                None
-            };
             Ok(ApiManagedName {
                 name: registration.name,
                 payment_address,
@@ -233,11 +216,6 @@ pub fn get_managed_names_v1(
                 commit_height: registration.commit_height.map(u64::from),
                 commit_expiry_height: commit_expiry_height.map(u64::from),
                 commit_blocks_remaining: commit_blocks_remaining.map(u64::from),
-                next_reveal_height: next_reveal_height.map(u64::from),
-                reveal_blocks_until: next_reveal_height
-                    .map(|height| height.saturating_sub(construction_height))
-                    .map(u64::from),
-                reveal_ready: next_reveal_height == Some(construction_height),
             })
         })
         .collect()
@@ -326,9 +304,9 @@ pub fn begin_names_v1_registration(
     })
 }
 
-/// Builds and signs a Names REVEAL for the exact scheduled anchor, but does
-/// not broadcast. Execution is later routed through the ordinary proposal
-/// review/confirmation entrypoint.
+/// Builds and signs a Names REVEAL after the canonical COMMIT is accepted and
+/// while its protocol-defined TTL is still live. Execution is later routed
+/// through the ordinary proposal review/confirmation entrypoint.
 pub fn begin_names_v1_reveal(
     db_path: String,
     lightwalletd_url: String,
@@ -360,7 +338,7 @@ pub fn begin_names_v1_reveal(
 }
 
 /// Proves and broadcasts REVEAL after the runtime has authenticated the exact
-/// accepted COMMIT and the canonical schedule reaches this name's anchor.
+/// accepted COMMIT and the protocol-defined COMMIT TTL is still live.
 pub fn reveal_names_v1_registration(
     db_path: String,
     lightwalletd_url: String,

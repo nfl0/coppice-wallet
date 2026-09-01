@@ -129,9 +129,9 @@ Future<ApiNamesCommitProposal> beginNamesV1Registration({
   mnemonicBytes: mnemonicBytes,
 );
 
-/// Builds and signs a Names REVEAL for the exact scheduled anchor, but does
-/// not broadcast. Execution is later routed through the ordinary proposal
-/// review/confirmation entrypoint.
+/// Builds and signs a Names REVEAL after the canonical COMMIT is accepted and
+/// while its protocol-defined TTL is still live. Execution is later routed
+/// through the ordinary proposal review/confirmation entrypoint.
 Future<ApiNamesRevealProposal> beginNamesV1Reveal({
   required String dbPath,
   required String lightwalletdUrl,
@@ -151,7 +151,7 @@ Future<ApiNamesRevealProposal> beginNamesV1Reveal({
 );
 
 /// Proves and broadcasts REVEAL after the runtime has authenticated the exact
-/// accepted COMMIT and the canonical schedule reaches this name's anchor.
+/// accepted COMMIT and the protocol-defined COMMIT TTL is still live.
 Future<Uint8List> revealNamesV1Registration({
   required String dbPath,
   required String lightwalletdUrl,
@@ -222,9 +222,6 @@ class ApiManagedName {
   final BigInt? commitHeight;
   final BigInt? commitExpiryHeight;
   final BigInt? commitBlocksRemaining;
-  final BigInt? nextRevealHeight;
-  final BigInt? revealBlocksUntil;
-  final bool revealReady;
 
   const ApiManagedName({
     required this.name,
@@ -234,9 +231,6 @@ class ApiManagedName {
     this.commitHeight,
     this.commitExpiryHeight,
     this.commitBlocksRemaining,
-    this.nextRevealHeight,
-    this.revealBlocksUntil,
-    required this.revealReady,
   });
 
   @override
@@ -247,10 +241,7 @@ class ApiManagedName {
       commitment.hashCode ^
       commitHeight.hashCode ^
       commitExpiryHeight.hashCode ^
-      commitBlocksRemaining.hashCode ^
-      nextRevealHeight.hashCode ^
-      revealBlocksUntil.hashCode ^
-      revealReady.hashCode;
+      commitBlocksRemaining.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -263,10 +254,7 @@ class ApiManagedName {
           commitment == other.commitment &&
           commitHeight == other.commitHeight &&
           commitExpiryHeight == other.commitExpiryHeight &&
-          commitBlocksRemaining == other.commitBlocksRemaining &&
-          nextRevealHeight == other.nextRevealHeight &&
-          revealBlocksUntil == other.revealBlocksUntil &&
-          revealReady == other.revealReady;
+          commitBlocksRemaining == other.commitBlocksRemaining;
 }
 
 /// Wallet-owned denomination readiness for starting a registration.

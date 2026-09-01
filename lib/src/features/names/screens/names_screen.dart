@@ -206,8 +206,8 @@ class _NamesViewState extends ConsumerState<NamesView> {
     }
     if (!mounted) return;
     // Refresh after returning from review/status and on begin failure: the
-    // reveal window is height-bound, so countdown and lifecycle state stay in
-    // sync with the latest chain tip.
+    // Keep lifecycle state in sync with the latest chain tip after review or
+    // a failed proposal attempt.
     unawaited(ref.read(managedNamesProvider.notifier).refresh());
     setState(() {
       _managedNameInFlight = null;
@@ -916,7 +916,7 @@ class _RegistrationCard extends StatelessWidget {
         Text(
           'Registration uses an exact 1 ZEC refundable bond. If the wallet '
           'does not have that denomination, it will prepare one first. After '
-          'COMMIT is accepted, return at the scheduled block to approve REVEAL.',
+          'COMMIT is accepted, approve REVEAL before its commitment expires.',
           style: AppTypography.bodySmall.copyWith(color: colors.text.secondary),
         ),
         const SizedBox(height: AppSpacing.sm),
@@ -1122,24 +1122,10 @@ class _ManagedNamesCard extends StatelessWidget {
                                         color: colors.text.warning,
                                       ),
                                     ),
-                                  if (item.phase == 'commit_accepted' &&
-                                      item.nextRevealHeight != null)
-                                    Text(
-                                      item.revealReady
-                                          ? 'REVEAL is ready for the next block.'
-                                          : 'REVEAL in ${item.revealBlocksUntil} blocks '
-                                                '(height ${item.nextRevealHeight}).',
-                                      style: AppTypography.bodySmall.copyWith(
-                                        color: item.revealReady
-                                            ? colors.text.success
-                                            : colors.text.secondary,
-                                      ),
-                                    ),
                                 ],
                               ),
                             ),
-                            if (item.phase == 'commit_accepted' &&
-                                item.revealReady)
+                            if (item.phase == 'commit_accepted')
                               AppButton(
                                 key: ValueKey(
                                   'names_reveal_button_${item.name}',
@@ -1252,9 +1238,9 @@ String _managedPhaseLabel(String phase) => switch (phase) {
   'bond_reserved' => 'Exact 1 ZEC bond reserved — continue registration',
   'commit_proposed' => 'COMMIT proposal awaiting wallet confirmation',
   'commit_broadcast' => 'COMMIT broadcast — awaiting canonical Names replay',
-  'commit_accepted' => 'COMMIT accepted — REVEAL when scheduled',
+  'commit_accepted' => 'COMMIT accepted — REVEAL is available',
   'commit_expired' => 'COMMIT expired before REVEAL',
-  'reveal_broadcast' => 'REVEAL broadcast — confirming at its scheduled block',
+  'reveal_broadcast' => 'REVEAL broadcast — awaiting confirmation',
   'active' => 'Active',
   'released' => 'Released',
   'expired' => 'Lease expired',

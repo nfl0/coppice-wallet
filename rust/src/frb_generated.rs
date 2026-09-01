@@ -8442,9 +8442,6 @@ impl SseDecode for crate::api::names::ApiManagedName {
         let mut var_commitHeight = <Option<u64>>::sse_decode(deserializer);
         let mut var_commitExpiryHeight = <Option<u64>>::sse_decode(deserializer);
         let mut var_commitBlocksRemaining = <Option<u64>>::sse_decode(deserializer);
-        let mut var_nextRevealHeight = <Option<u64>>::sse_decode(deserializer);
-        let mut var_revealBlocksUntil = <Option<u64>>::sse_decode(deserializer);
-        let mut var_revealReady = <bool>::sse_decode(deserializer);
         return crate::api::names::ApiManagedName {
             name: var_name,
             payment_address: var_paymentAddress,
@@ -8453,9 +8450,6 @@ impl SseDecode for crate::api::names::ApiManagedName {
             commit_height: var_commitHeight,
             commit_expiry_height: var_commitExpiryHeight,
             commit_blocks_remaining: var_commitBlocksRemaining,
-            next_reveal_height: var_nextRevealHeight,
-            reveal_blocks_until: var_revealBlocksUntil,
-            reveal_ready: var_revealReady,
         };
     }
 }
@@ -12109,9 +12103,6 @@ impl flutter_rust_bridge::IntoDart for crate::api::names::ApiManagedName {
             self.commit_height.into_into_dart().into_dart(),
             self.commit_expiry_height.into_into_dart().into_dart(),
             self.commit_blocks_remaining.into_into_dart().into_dart(),
-            self.next_reveal_height.into_into_dart().into_dart(),
-            self.reveal_blocks_until.into_into_dart().into_dart(),
-            self.reveal_ready.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -15165,9 +15156,6 @@ impl SseEncode for crate::api::names::ApiManagedName {
         <Option<u64>>::sse_encode(self.commit_height, serializer);
         <Option<u64>>::sse_encode(self.commit_expiry_height, serializer);
         <Option<u64>>::sse_encode(self.commit_blocks_remaining, serializer);
-        <Option<u64>>::sse_encode(self.next_reveal_height, serializer);
-        <Option<u64>>::sse_encode(self.reveal_blocks_until, serializer);
-        <bool>::sse_encode(self.reveal_ready, serializer);
     }
 }
 
