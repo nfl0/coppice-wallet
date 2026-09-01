@@ -145,6 +145,14 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
       );
       return null;
     }
+    final validationError = zecNameLabelValidationError(name);
+    if (validationError != null) {
+      state = NamesRegistrationState(
+        bondStatus: state.bondStatus,
+        error: validationError,
+      );
+      return null;
+    }
     state = NamesRegistrationState(
       inFlight: true,
       bondStatus: state.bondStatus,
@@ -234,6 +242,14 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
     if (accountNotifier.isHardwareAccount(accountUuid)) {
       state = const NamesRegistrationState(
         error: 'Names registration currently requires a software account.',
+      );
+      return null;
+    }
+    final validationError = zecNameLabelValidationError(name);
+    if (validationError != null) {
+      state = NamesRegistrationState(
+        bondStatus: state.bondStatus,
+        error: validationError,
       );
       return null;
     }

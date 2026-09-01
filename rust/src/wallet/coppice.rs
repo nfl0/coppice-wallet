@@ -1235,7 +1235,8 @@ pub(crate) async fn bootstrap(
     }
     if host_tip.height > tip_height {
         return Err(
-            "persisted Names state is ahead of lightwalletd; rebootstrap is required".into(),
+            "persisted Names state is ahead of lightwalletd; wait for the endpoint to catch up or explicitly reconfigure Names to rebuild"
+                .into(),
         );
     }
     if host_tip.height == tip_height {

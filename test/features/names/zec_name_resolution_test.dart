@@ -33,6 +33,24 @@ void main() {
     });
   });
 
+  group('zecNameLabelValidationError', () {
+    test('accepts canonical labels and normalized presentation', () {
+      expect(zecNameLabelValidationError('alice'), isNull);
+      expect(zecNameLabelValidationError(' Alice-42 '), isNull);
+      expect(zecNameLabelValidationError('a'), isNull);
+      expect(zecNameLabelValidationError('a' * 63), isNull);
+    });
+
+    test('rejects suffixes, invalid characters, boundaries, and length', () {
+      expect(zecNameLabelValidationError('alice.zec'), isNotNull);
+      expect(zecNameLabelValidationError('alice_42'), isNotNull);
+      expect(zecNameLabelValidationError('-alice'), isNotNull);
+      expect(zecNameLabelValidationError('alice-'), isNotNull);
+      expect(zecNameLabelValidationError('a' * 64), isNotNull);
+      expect(zecNameLabelValidationError('ليس'), isNotNull);
+    });
+  });
+
   group('changedZecNameRecipientMessage', () {
     test('accepts a fresh result when the payment address is unchanged', () {
       expect(

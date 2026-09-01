@@ -82,6 +82,30 @@ bool looksLikeZecName(String input) {
       trimmed.endsWith(kZecNameSuffix);
 }
 
+final RegExp _zecNameLabelPattern = RegExp(r'^[a-z0-9]([a-z0-9-]*[a-z0-9])?$');
+
+/// Returns user-facing copy when [input] is not a valid bare registration
+/// label, or `null` when it is. Names v1 canonical labels are 1-63 bytes of
+/// `[a-z0-9-]` with no leading or trailing hyphen (see
+/// `coppice_names::v1::state::normalize_name`). The Rust host enforces the
+/// same rules authoritatively; this mirrors them so users get immediate,
+/// actionable feedback before any bond preparation starts.
+String? zecNameLabelValidationError(String input) {
+  final label = input.trim().toLowerCase();
+  if (label.isEmpty) return 'Enter a name label.';
+  if (label.contains('.')) {
+    return 'Enter the label only; .zec is added automatically.';
+  }
+  if (label.length > 63) {
+    return 'Name labels can be at most 63 characters.';
+  }
+  if (!_zecNameLabelPattern.hasMatch(label)) {
+    return 'Use lowercase letters, digits, and hyphens only, with no '
+        'leading or trailing hyphen.';
+  }
+  return null;
+}
+
 /// Normalizes `.zec` presentation (trim + lowercase) and resolves the name
 /// through the wallet's FreshResolver against the active endpoint.
 ///

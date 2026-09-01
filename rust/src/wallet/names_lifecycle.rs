@@ -128,6 +128,39 @@ pub(crate) struct NamesCommitProposal {
     pub commitment: [u8; 32],
 }
 
+fn canonical_registration_name(name: &str) -> Result<String, String> {
+    let canonical_name = name.trim().to_ascii_lowercase();
+    if canonical_name.is_empty() || canonical_name.contains('.') {
+        return Err("enter the name label only; .zec is added by the wallet".to_string());
+    }
+    coppice_names::v1::state::name_id(&canonical_name).map_err(|_| {
+        "Names labels use 1-63 lowercase letters, digits, or hyphens, with no leading or trailing hyphen"
+            .to_string()
+    })?;
+    Ok(canonical_name)
+}
+
+fn registration_payment_record(
+    existing: Option<&StoredRegistration>,
+    payment_network: coppice_names::v1::PaymentNetwork,
+    payment_address: &str,
+) -> Result<Vec<u8>, String> {
+    let requested = PaymentRecord::new(payment_network, payment_address)
+        .map_err(|error| format!("invalid Names payment record: {error:?}"))?;
+    let Some(existing) = existing else {
+        return Ok(requested.encode());
+    };
+    let stored = PaymentRecord::decode(&existing.record, payment_network)
+        .map_err(|error| format!("stored Names payment record is invalid: {error:?}"))?;
+    if stored != requested {
+        return Err(
+            "this Names draft is bound to a different payment address; discard the workflow and register again to change it"
+                .to_string(),
+        );
+    }
+    Ok(existing.record.clone())
+}
+
 /// Records a user-approved registration intent before a denomination split.
 /// The intent is durable, so sync can reserve the resulting exact one-ZEC
 /// note immediately after the self-transfer confirms.
@@ -140,10 +173,7 @@ pub(crate) fn prepare_registration_draft(
     seed: SecretVec<u8>,
 ) -> Result<(), String> {
     let context = coppice::lifecycle_context(db_path, network)?;
-    let canonical_name = name.trim().to_ascii_lowercase();
-    if canonical_name.is_empty() || canonical_name.contains('.') {
-        return Err("enter the name label only; .zec is added by the wallet".to_string());
-    }
+    let canonical_name = canonical_registration_name(name)?;
     if coppice::registration(db_path, account_uuid, &canonical_name)?.is_some() {
         return Err("this wallet account already has a registration workflow for that name".into());
     }
@@ -221,8 +251,9 @@ fn reserve_pending_bonds_locked(db_path: &str, network: WalletNetwork) -> Result
         .ok_or_else(|| "wallet has no synchronized target height".to_string())?
         .0;
     for mut registration in pending
-        .into_iter()
+        .iter()
         .filter(|registration| registration.phase == "awaiting_bond")
+        .cloned()
     {
         let account_id = parse_account_uuid(&registration.account_uuid)?;
         let candidates = db
@@ -267,6 +298,33 @@ fn reserve_pending_bonds_locked(db_path: &str, network: WalletNetwork) -> Result
         registration.phase = "bond_reserved".to_string();
         coppice::replace_registration(db_path, registration)?;
     }
+    // A reserved bond's lock is height-bounded and was stamped when the note
+    // was first reserved. If the user pauses before COMMIT, the lock can
+    // expire while the workflow still needs the exact note, letting an
+    // ordinary send consume it. Refresh the lock on every sync with the same
+    // deterministic owner so `bond_reserved` stays protected.
+    for registration in pending
+        .iter()
+        .filter(|registration| registration.phase == "bond_reserved")
+    {
+        let (Some(txid), Some(output_index)) =
+            (registration.bond_txid, registration.bond_output_index)
+        else {
+            continue;
+        };
+        let output = OutputRef::new(
+            TxId::from_bytes(txid),
+            PoolType::Shielded(ShieldedPool::Ironwood),
+            output_index,
+        );
+        let expiry = BlockHeight::from_u32(
+            u32::from(target_height)
+                .saturating_add(metadata.params.commit_ttl_blocks)
+                .saturating_add(2),
+        );
+        db.lock_outputs(&[output], LockOwner::new(registration.commitment), expiry)
+            .map_err(|error| format!("refresh reserved Names bond lock: {error:?}"))?;
+    }
     Ok(())
 }
 
@@ -310,10 +368,7 @@ pub(crate) fn begin_registration(
             context.params.minimum_bond_zatoshis
         ));
     }
-    let canonical_name = name.trim().to_ascii_lowercase();
-    if canonical_name.is_empty() || canonical_name.contains('.') {
-        return Err("enter the name label only; .zec is added by the wallet".to_string());
-    }
+    let canonical_name = canonical_registration_name(name)?;
 
     let account_id = parse_account_uuid(account_uuid)?;
     let mut db = open_wallet_db(db_path, network)?;
@@ -335,12 +390,10 @@ pub(crate) fn begin_registration(
             return Err("this Names registration is already in progress or complete".to_string());
         }
     }
-    let record = match &existing {
-        Some(registration) => registration.record.clone(),
-        None => PaymentRecord::new(context.payment_network, payment_address)
-            .map_err(|error| format!("invalid Names payment record: {error:?}"))?
-            .encode(),
-    };
+    // A draft's canonical payment record is immutable once stored. Validate
+    // both sides and fail closed if the durable record cannot be decoded.
+    let record =
+        registration_payment_record(existing.as_ref(), context.payment_network, payment_address)?;
     let nonce = existing
         .as_ref()
         .map(|registration| registration.nonce)
@@ -352,10 +405,7 @@ pub(crate) fn begin_registration(
     let intent = RegistrationIntent {
         name: canonical_name.clone(),
         owner_pk: spend_auth_owner_key_bytes(&ask),
-        record: existing
-            .as_ref()
-            .map(|registration| registration.record.clone())
-            .unwrap_or_else(|| record.clone()),
+        record: record.clone(),
         secret: registration_secret(seed.expose_secret(), account_uuid, &canonical_name, nonce),
     };
     drop(seed);
@@ -712,6 +762,7 @@ pub(crate) fn build_reveal(
         .map_err(|error| format!("read Names operation notes: {error}"))?;
     let mut registration_note = None;
     let mut funding_note = None;
+    let mut funding_value = 0u64;
     for candidate in candidates {
         let candidate_txid: [u8; 32] = (*candidate.txid()).into();
         if registration.bond_txid == Some(candidate_txid)
@@ -720,17 +771,23 @@ pub(crate) fn build_reveal(
             registration_note = Some(candidate);
             continue;
         }
-        if funding_note.is_none() {
-            let spendable = db
-                .get_spendable_note(
-                    candidate.txid(),
-                    ShieldedPool::Ironwood,
-                    u32::from(candidate.output_index()),
-                    TargetHeight::from(BlockHeight::from_u32(construction_height)),
-                    LockFilter::Policy(&LockedInputPolicy::Exclude),
-                )
-                .map_err(|error| format!("classify Names fee note: {error}"))?;
-            if spendable.is_some() {
+        // One funding note must cover the carrier outputs plus the fee on its
+        // own, so the largest spendable candidate is the only choice that can
+        // possibly be adequate. Selecting the first spendable note instead
+        // could fail even when a later note has enough value.
+        let spendable = db
+            .get_spendable_note(
+                candidate.txid(),
+                ShieldedPool::Ironwood,
+                u32::from(candidate.output_index()),
+                TargetHeight::from(BlockHeight::from_u32(construction_height)),
+                LockFilter::Policy(&LockedInputPolicy::Exclude),
+            )
+            .map_err(|error| format!("classify Names fee note: {error}"))?;
+        if spendable.is_some() {
+            let value = candidate.note().value().inner();
+            if value > funding_value {
+                funding_value = value;
                 funding_note = Some(candidate);
             }
         }
@@ -1226,6 +1283,7 @@ pub(crate) fn build_transition(
         .map_err(|error| format!("read managed Names notes: {error}"))?;
     let mut state_note = None;
     let mut funding_note = None;
+    let mut funding_value = 0u64;
     for candidate in notes {
         if ExtractedNoteCommitment::from(candidate.note().commitment()).to_bytes()
             == predecessor.commitment
@@ -1233,19 +1291,24 @@ pub(crate) fn build_transition(
             state_note = Some(candidate);
             continue;
         }
-        if funding_note.is_none()
-            && db
-                .get_spendable_note(
-                    candidate.txid(),
-                    ShieldedPool::Ironwood,
-                    u32::from(candidate.output_index()),
-                    TargetHeight::from(BlockHeight::from_u32(height)),
-                    LockFilter::Policy(&LockedInputPolicy::Exclude),
-                )
-                .map_err(|error| format!("classify Names fee note: {error}"))?
-                .is_some()
-        {
-            funding_note = Some(candidate);
+        // One funding note must cover the carrier outputs plus the fee on its
+        // own, so the largest spendable candidate is the only choice that can
+        // possibly be adequate.
+        let spendable = db
+            .get_spendable_note(
+                candidate.txid(),
+                ShieldedPool::Ironwood,
+                u32::from(candidate.output_index()),
+                TargetHeight::from(BlockHeight::from_u32(height)),
+                LockFilter::Policy(&LockedInputPolicy::Exclude),
+            )
+            .map_err(|error| format!("classify Names fee note: {error}"))?;
+        if spendable.is_some() {
+            let value = candidate.note().value().inner();
+            if value > funding_value {
+                funding_value = value;
+                funding_note = Some(candidate);
+            }
         }
     }
     let state_note = state_note
@@ -1487,7 +1550,30 @@ pub(crate) async fn execute_transition(
 
 #[cfg(test)]
 mod tests {
-    use super::broadcast_window_open_at_tip;
+    use super::{
+        broadcast_window_open_at_tip, canonical_registration_name, registration_payment_record,
+        StoredRegistration,
+    };
+    use coppice_names::v1::{PaymentNetwork, PaymentRecord};
+
+    const MAINNET_UA: &str = "u1pg2aaph7jp8rpf6yhsza25722sg5fcn3vaca6ze27hqjw7jvvhhuxkpcg0ge9xh6drsgdkda8qjq5chpehkcpxf87rnjryjqwymdheptpvnljqqrjqzjwkc2ma6hcq666kgwfytxwac8eyex6ndgr6ezte66706e3vaqrd25dzvzkc69kw0jgywtd0cmq52q5lkw6uh7hyvzjse8ksx";
+
+    fn registration(record: Vec<u8>) -> StoredRegistration {
+        StoredRegistration {
+            account_uuid: "account".to_string(),
+            name: "alice".to_string(),
+            record,
+            nonce: [1; 32],
+            commitment: [2; 32],
+            send_flow_id: None,
+            bond_txid: None,
+            bond_output_index: None,
+            commit_height: None,
+            phase: "awaiting_bond".to_string(),
+            commit_txid: None,
+            reveal_txid: None,
+        }
+    }
 
     #[test]
     fn reviewed_names_operation_survives_block_advances_inside_its_window() {
@@ -1495,5 +1581,48 @@ mod tests {
         assert!(broadcast_window_open_at_tip(108, 101, 115));
         assert!(broadcast_window_open_at_tip(114, 101, 115));
         assert!(!broadcast_window_open_at_tip(115, 101, 115));
+    }
+
+    #[test]
+    fn registration_name_validation_matches_protocol_rules() {
+        assert_eq!(
+            canonical_registration_name(" Alice-42 ").unwrap(),
+            "alice-42"
+        );
+        for invalid in [
+            "",
+            ".zec",
+            "alice.zec",
+            "-alice",
+            "alice-",
+            "alice_name",
+            "ليس",
+        ] {
+            assert!(canonical_registration_name(invalid).is_err(), "{invalid}");
+        }
+        assert!(canonical_registration_name(&"a".repeat(63)).is_ok());
+        assert!(canonical_registration_name(&"a".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn existing_registration_payment_record_is_validated_fail_closed() {
+        let encoded = PaymentRecord::new(PaymentNetwork::Main, MAINNET_UA)
+            .unwrap()
+            .encode();
+        let valid = registration(encoded.clone());
+        assert_eq!(
+            registration_payment_record(Some(&valid), PaymentNetwork::Main, MAINNET_UA).unwrap(),
+            encoded
+        );
+
+        let malformed = registration(vec![1, 2, 3]);
+        assert!(
+            registration_payment_record(Some(&malformed), PaymentNetwork::Main, MAINNET_UA)
+                .unwrap_err()
+                .contains("stored Names payment record is invalid")
+        );
+        assert!(
+            registration_payment_record(Some(&valid), PaymentNetwork::Test, MAINNET_UA).is_err()
+        );
     }
 }
