@@ -1290,12 +1290,27 @@ pub(crate) fn persist_after_scan(
             }
         }
         for registration in &mut stored.registrations {
-            if registration.reveal_txid.is_none()
-                && registration.commit_height.is_some_and(|height| {
+            if registration.reveal_txid.is_none() {
+                if registration.commit_height.is_some_and(|height| {
                     height.saturating_add(commit_ttl_blocks) <= host.tip_height()
-                })
-            {
-                registration.phase = "commit_expired".into();
+                }) {
+                    registration.phase = "commit_expired".into();
+                    continue;
+                }
+                let name = Name::parse(&registration.name)
+                    .map_err(|error| format!("invalid stored Names label: {error:?}"))?;
+                let window = host
+                    .config
+                    .parameters(host.network)?
+                    .window(
+                        name.id()
+                            .map_err(|error| format!("derive stored name ID: {error:?}"))?,
+                        registration.target_epoch,
+                    )
+                    .map_err(|error| format!("derive stored Names window: {error:?}"))?;
+                if host.tip_height().saturating_add(1) >= window.end {
+                    registration.phase = "window_missed".into();
+                }
             }
         }
         Ok(())

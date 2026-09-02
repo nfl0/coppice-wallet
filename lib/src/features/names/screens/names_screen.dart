@@ -1126,10 +1126,25 @@ class _ManagedNamesCard extends StatelessWidget {
                                         color: colors.text.warning,
                                       ),
                                     ),
+                                  if (item.phase == 'commit_accepted')
+                                    Text(
+                                      item.revealWindowOpen
+                                          ? 'REVEAL window is open through height '
+                                                '${item.revealWindowEnd - BigInt.one}'
+                                          : 'REVEAL window opens at height '
+                                                '${item.revealWindowStart} '
+                                                '(${item.revealBlocksUntil} blocks)',
+                                      style: AppTypography.bodySmall.copyWith(
+                                        color: item.revealWindowOpen
+                                            ? colors.text.success
+                                            : colors.text.secondary,
+                                      ),
+                                    ),
                                 ],
                               ),
                             ),
-                            if (item.phase == 'commit_accepted')
+                            if (item.phase == 'commit_accepted' &&
+                                item.revealWindowOpen)
                               AppButton(
                                 key: ValueKey(
                                   'names_reveal_button_${item.name}',

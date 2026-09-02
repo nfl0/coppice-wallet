@@ -29,6 +29,10 @@ class _ReviewManagedNamesNotifier extends ManagedNamesNotifier {
       name: name,
       phase: 'commit_accepted',
       commitment: Uint8List.fromList([1, 2, 3]),
+      revealWindowStart: BigInt.from(100),
+      revealWindowEnd: BigInt.from(124),
+      revealBlocksUntil: BigInt.zero,
+      revealWindowOpen: true,
     ),
   ];
 
@@ -44,6 +48,21 @@ class _ReviewManagedNamesNotifier extends ManagedNamesNotifier {
     needsSaplingParams: false,
     memo: 'Reveal ${name.trim().toLowerCase()}',
   );
+}
+
+class _WaitingManagedNamesNotifier extends ManagedNamesNotifier {
+  @override
+  Future<List<rust_names.ApiManagedName>> build() async => [
+    rust_names.ApiManagedName(
+      name: 'waiting',
+      phase: 'commit_accepted',
+      commitment: Uint8List.fromList([1, 2, 3]),
+      revealWindowStart: BigInt.from(120),
+      revealWindowEnd: BigInt.from(144),
+      revealBlocksUntil: BigInt.from(19),
+      revealWindowOpen: false,
+    ),
+  ];
 }
 
 class _EmptyAccountNotifier extends AccountNotifier {
@@ -149,6 +168,38 @@ void main() {
     expect(
       find.text('Coppice Names REVEAL|1234|Reveal reviewable'),
       findsOneWidget,
+    );
+  });
+
+  testWidgets('accepted COMMIT waits for its deterministic REVEAL window', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          namesDeploymentProfileProvider.overrideWithValue(
+            kLocalRegtestNamesDeploymentProfile,
+          ),
+          namesStatusProvider.overrideWith(() => _ReadyNamesStatusNotifier()),
+          managedNamesProvider.overrideWith(_WaitingManagedNamesNotifier.new),
+        ],
+        child: MaterialApp(
+          home: AppTheme(
+            data: AppThemeData.light,
+            child: const Scaffold(body: NamesView(showDesktopChrome: false)),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('REVEAL window opens at height 120 (19 blocks)'),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('names_reveal_button_waiting')),
+      findsNothing,
     );
   });
 }

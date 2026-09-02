@@ -64,6 +64,11 @@ pub struct ApiManagedName {
     pub commit_height: Option<u64>,
     pub commit_expiry_height: Option<u64>,
     pub commit_blocks_remaining: Option<u64>,
+    /// The deterministic half-open REVEAL window selected by this workflow.
+    pub reveal_window_start: u64,
+    pub reveal_window_end: u64,
+    pub reveal_blocks_until: u64,
+    pub reveal_window_open: bool,
 }
 
 impl From<coppice::NamesWalletStatus> for ApiNamesWalletStatus {
@@ -164,6 +169,17 @@ pub fn get_managed_names(
     coppice::managed_registrations(&db_path, network, &account_uuid)?
         .into_iter()
         .map(|registration| {
+            let name = coppice_names::protocol::Name::parse(&registration.name)
+                .map_err(|error| format!("invalid stored Names label: {error:?}"))?;
+            let window = metadata
+                .parameters
+                .window(
+                    name.id()
+                        .map_err(|error| format!("derive stored name ID: {error:?}"))?,
+                    registration.target_epoch,
+                )
+                .map_err(|error| format!("derive stored Names window: {error:?}"))?;
+            let next_height = current_tip.saturating_add(1);
             let payment_address = Some(registration.ua.clone());
             let commit_expiry_height = registration
                 .commit_height
@@ -178,6 +194,10 @@ pub fn get_managed_names(
                 commit_height: registration.commit_height.map(u64::from),
                 commit_expiry_height: commit_expiry_height.map(u64::from),
                 commit_blocks_remaining: commit_blocks_remaining.map(u64::from),
+                reveal_window_start: u64::from(window.start),
+                reveal_window_end: u64::from(window.end),
+                reveal_blocks_until: u64::from(window.start.saturating_sub(next_height)),
+                reveal_window_open: window.contains(next_height),
             })
         })
         .collect()

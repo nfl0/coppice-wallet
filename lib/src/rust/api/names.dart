@@ -197,6 +197,12 @@ class ApiManagedName {
   final BigInt? commitExpiryHeight;
   final BigInt? commitBlocksRemaining;
 
+  /// The deterministic half-open REVEAL window selected by this workflow.
+  final BigInt revealWindowStart;
+  final BigInt revealWindowEnd;
+  final BigInt revealBlocksUntil;
+  final bool revealWindowOpen;
+
   const ApiManagedName({
     required this.name,
     this.paymentAddress,
@@ -205,6 +211,10 @@ class ApiManagedName {
     this.commitHeight,
     this.commitExpiryHeight,
     this.commitBlocksRemaining,
+    required this.revealWindowStart,
+    required this.revealWindowEnd,
+    required this.revealBlocksUntil,
+    required this.revealWindowOpen,
   });
 
   @override
@@ -215,7 +225,11 @@ class ApiManagedName {
       commitment.hashCode ^
       commitHeight.hashCode ^
       commitExpiryHeight.hashCode ^
-      commitBlocksRemaining.hashCode;
+      commitBlocksRemaining.hashCode ^
+      revealWindowStart.hashCode ^
+      revealWindowEnd.hashCode ^
+      revealBlocksUntil.hashCode ^
+      revealWindowOpen.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -228,7 +242,11 @@ class ApiManagedName {
           commitment == other.commitment &&
           commitHeight == other.commitHeight &&
           commitExpiryHeight == other.commitExpiryHeight &&
-          commitBlocksRemaining == other.commitBlocksRemaining;
+          commitBlocksRemaining == other.commitBlocksRemaining &&
+          revealWindowStart == other.revealWindowStart &&
+          revealWindowEnd == other.revealWindowEnd &&
+          revealBlocksUntil == other.revealBlocksUntil &&
+          revealWindowOpen == other.revealWindowOpen;
 }
 
 /// Wallet-owned denomination readiness for starting a registration.
