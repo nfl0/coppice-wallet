@@ -1961,4 +1961,50 @@ mod tests {
             .unwrap()
             .is_none());
     }
+
+    /// Opt-in smoke for the real local Zakura/Zaino deployment. Lifecycle
+    /// proving is covered separately; this exercises the committed wallet
+    /// host's gRPC activation checkpoint, exact replay, and cache reuse.
+    #[tokio::test]
+    #[ignore = "requires a live Zakura/Zaino regtest endpoint"]
+    async fn live_zaino_bootstrap_and_missing_resolution() {
+        let lightwalletd_url = std::env::var("COPPICE_NAMES_TEST_LIGHTWALLETD")
+            .unwrap_or_else(|_| "http://127.0.0.1:9067".into());
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("wallet.sqlite");
+        let db_path = db_path.to_str().unwrap();
+
+        let configured = configure(db_path, WalletNetwork::Regtest, 128).unwrap();
+        assert_eq!(configured.state, "needs_bootstrap");
+
+        let first = resolve_name(
+            db_path,
+            &lightwalletd_url,
+            WalletNetwork::Regtest,
+            "coppice-wallet-smoke",
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.status, "missing");
+        assert!(first.tip_height >= u64::from(REGTEST_ACTIVATION_HEIGHT));
+        assert!(first.compact_blocks_scanned > 0);
+
+        let ready = bootstrap(db_path, &lightwalletd_url, WalletNetwork::Regtest)
+            .await
+            .unwrap();
+        assert_eq!(ready.state, "ready");
+        assert_eq!(ready.tip_height, first.tip_height);
+
+        let cached = resolve_name(
+            db_path,
+            &lightwalletd_url,
+            WalletNetwork::Regtest,
+            "coppice-wallet-smoke",
+        )
+        .await
+        .unwrap();
+        assert_eq!(cached.status, "missing");
+        assert_eq!(cached.tip_height, first.tip_height);
+        assert_eq!(cached.compact_blocks_scanned, 0);
+    }
 }
