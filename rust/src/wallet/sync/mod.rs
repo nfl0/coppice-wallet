@@ -785,7 +785,7 @@ pub(crate) async fn try_execute_names_reveal_proposal(
         };
     }
 
-    if let Err(error) = crate::wallet::names_lifecycle::ensure_broadcast_window_open(
+    if let Err(error) = crate::wallet::names_lifecycle::ensure_transaction_window_open(
         lightwalletd_url,
         execution.valid_from_height,
         execution.expiry_height,

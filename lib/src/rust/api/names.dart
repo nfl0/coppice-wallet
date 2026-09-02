@@ -8,46 +8,20 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`
 
-ApiNamesWalletStatus configureNamesV1({
+ApiNamesWalletStatus configureNames({
   required String dbPath,
   required String network,
-  required BigInt runtimeActivationHeight,
-  required BigInt namesActivationHeight,
-  required BigInt epochSize,
-  required BigInt commitTtlBlocks,
-  required BigInt refreshDeadlineBlocks,
-  required BigInt leaseDurationBlocks,
-  required BigInt gracePeriodBlocks,
-  required BigInt reuseDelayBlocks,
-  required BigInt maxRecordBytes,
-  required BigInt minimumBondZatoshis,
   required BigInt retentionBlocks,
-  required String networkDomain,
-  required String rendezvousIvkHex,
-  required String rendezvousReceiverHex,
-}) => RustLib.instance.api.crateApiNamesConfigureNamesV1(
+}) => RustLib.instance.api.crateApiNamesConfigureNames(
   dbPath: dbPath,
   network: network,
-  runtimeActivationHeight: runtimeActivationHeight,
-  namesActivationHeight: namesActivationHeight,
-  epochSize: epochSize,
-  commitTtlBlocks: commitTtlBlocks,
-  refreshDeadlineBlocks: refreshDeadlineBlocks,
-  leaseDurationBlocks: leaseDurationBlocks,
-  gracePeriodBlocks: gracePeriodBlocks,
-  reuseDelayBlocks: reuseDelayBlocks,
-  maxRecordBytes: maxRecordBytes,
-  minimumBondZatoshis: minimumBondZatoshis,
   retentionBlocks: retentionBlocks,
-  networkDomain: networkDomain,
-  rendezvousIvkHex: rendezvousIvkHex,
-  rendezvousReceiverHex: rendezvousReceiverHex,
 );
 
-ApiNamesWalletStatus getNamesV1Status({
+ApiNamesWalletStatus getNamesStatus({
   required String dbPath,
   required String network,
-}) => RustLib.instance.api.crateApiNamesGetNamesV1Status(
+}) => RustLib.instance.api.crateApiNamesGetNamesStatus(
   dbPath: dbPath,
   network: network,
 );
@@ -55,21 +29,21 @@ ApiNamesWalletStatus getNamesV1Status({
 /// Checks the selected account for an exact, spendable and unreserved one-ZEC
 /// Ironwood note. A `needs_preparation` result tells the UI to ask the wallet
 /// send engine for an ordinary one-ZEC self-transfer before COMMIT.
-ApiNamesBondStatus getNamesV1BondStatus({
+ApiNamesBondStatus getNamesBondStatus({
   required String dbPath,
   required String network,
   required String accountUuid,
-}) => RustLib.instance.api.crateApiNamesGetNamesV1BondStatus(
+}) => RustLib.instance.api.crateApiNamesGetNamesBondStatus(
   dbPath: dbPath,
   network: network,
   accountUuid: accountUuid,
 );
 
-List<ApiManagedName> getManagedNamesV1({
+List<ApiManagedName> getManagedNames({
   required String dbPath,
   required String network,
   required String accountUuid,
-}) => RustLib.instance.api.crateApiNamesGetManagedNamesV1(
+}) => RustLib.instance.api.crateApiNamesGetManagedNames(
   dbPath: dbPath,
   network: network,
   accountUuid: accountUuid,
@@ -78,14 +52,14 @@ List<ApiManagedName> getManagedNamesV1({
 /// Persist a registration intent before the wallet prepares an exact bond.
 /// If an eligible note already exists it is immediately reserved; otherwise
 /// sync will reserve the self-transfer output as soon as it is confirmed.
-Future<ApiNamesRegistrationDraft> prepareNamesV1RegistrationDraft({
+Future<ApiNamesRegistrationDraft> prepareNamesRegistrationDraft({
   required String dbPath,
   required String network,
   required String accountUuid,
   required String name,
   required String paymentAddress,
   required List<int> mnemonicBytes,
-}) => RustLib.instance.api.crateApiNamesPrepareNamesV1RegistrationDraft(
+}) => RustLib.instance.api.crateApiNamesPrepareNamesRegistrationDraft(
   dbPath: dbPath,
   network: network,
   accountUuid: accountUuid,
@@ -96,12 +70,12 @@ Future<ApiNamesRegistrationDraft> prepareNamesV1RegistrationDraft({
 
 /// Discards an uncompleted wallet-local workflow after the user explicitly
 /// abandons it. Canonical COMMIT/REVEAL state is never altered here.
-void discardNamesV1RegistrationWorkflow({
+void discardNamesRegistrationWorkflow({
   required String dbPath,
   required String network,
   required String accountUuid,
   required String name,
-}) => RustLib.instance.api.crateApiNamesDiscardNamesV1RegistrationWorkflow(
+}) => RustLib.instance.api.crateApiNamesDiscardNamesRegistrationWorkflow(
   dbPath: dbPath,
   network: network,
   accountUuid: accountUuid,
@@ -111,7 +85,7 @@ void discardNamesV1RegistrationWorkflow({
 /// Reserve the exact one-ZEC registration bond and create a COMMIT carrier
 /// proposal. This intentionally does not broadcast: the established wallet
 /// review and credential flow remains the sole transaction-execution path.
-Future<ApiNamesCommitProposal> beginNamesV1Registration({
+Future<ApiNamesCommitProposal> beginNamesRegistration({
   required String dbPath,
   required String network,
   required String accountUuid,
@@ -119,7 +93,7 @@ Future<ApiNamesCommitProposal> beginNamesV1Registration({
   required String name,
   required String paymentAddress,
   required List<int> mnemonicBytes,
-}) => RustLib.instance.api.crateApiNamesBeginNamesV1Registration(
+}) => RustLib.instance.api.crateApiNamesBeginNamesRegistration(
   dbPath: dbPath,
   network: network,
   accountUuid: accountUuid,
@@ -132,7 +106,7 @@ Future<ApiNamesCommitProposal> beginNamesV1Registration({
 /// Builds and signs a Names REVEAL after the canonical COMMIT is accepted and
 /// while its protocol-defined TTL is still live. Execution is later routed
 /// through the ordinary proposal review/confirmation entrypoint.
-Future<ApiNamesRevealProposal> beginNamesV1Reveal({
+Future<ApiNamesRevealProposal> beginNamesReveal({
   required String dbPath,
   required String lightwalletdUrl,
   required String network,
@@ -140,7 +114,7 @@ Future<ApiNamesRevealProposal> beginNamesV1Reveal({
   required String sendFlowId,
   required String name,
   required List<int> mnemonicBytes,
-}) => RustLib.instance.api.crateApiNamesBeginNamesV1Reveal(
+}) => RustLib.instance.api.crateApiNamesBeginNamesReveal(
   dbPath: dbPath,
   lightwalletdUrl: lightwalletdUrl,
   network: network,
@@ -152,14 +126,14 @@ Future<ApiNamesRevealProposal> beginNamesV1Reveal({
 
 /// Proves and broadcasts REVEAL after the runtime has authenticated the exact
 /// accepted COMMIT and the protocol-defined COMMIT TTL is still live.
-Future<Uint8List> revealNamesV1Registration({
+Future<Uint8List> revealNamesRegistration({
   required String dbPath,
   required String lightwalletdUrl,
   required String network,
   required String accountUuid,
   required String name,
   required List<int> mnemonicBytes,
-}) => RustLib.instance.api.crateApiNamesRevealNamesV1Registration(
+}) => RustLib.instance.api.crateApiNamesRevealNamesRegistration(
   dbPath: dbPath,
   lightwalletdUrl: lightwalletdUrl,
   network: network,
@@ -169,7 +143,7 @@ Future<Uint8List> revealNamesV1Registration({
 );
 
 /// Proves and broadcasts one canonical current-head transition.
-Future<Uint8List> manageNameV1({
+Future<Uint8List> manageName({
   required String dbPath,
   required String lightwalletdUrl,
   required String network,
@@ -178,7 +152,7 @@ Future<Uint8List> manageNameV1({
   required String action,
   String? paymentAddress,
   required List<int> mnemonicBytes,
-}) => RustLib.instance.api.crateApiNamesManageNameV1(
+}) => RustLib.instance.api.crateApiNamesManageName(
   dbPath: dbPath,
   lightwalletdUrl: lightwalletdUrl,
   network: network,
@@ -189,22 +163,22 @@ Future<Uint8List> manageNameV1({
   mnemonicBytes: mnemonicBytes,
 );
 
-Future<ApiNamesWalletStatus> bootstrapNamesV1({
+Future<ApiNamesWalletStatus> bootstrapNames({
   required String dbPath,
   required String lightwalletdUrl,
   required String network,
-}) => RustLib.instance.api.crateApiNamesBootstrapNamesV1(
+}) => RustLib.instance.api.crateApiNamesBootstrapNames(
   dbPath: dbPath,
   lightwalletdUrl: lightwalletdUrl,
   network: network,
 );
 
-Future<ApiNamesResolution> resolveNameV1({
+Future<ApiNamesResolution> resolveName({
   required String dbPath,
   required String lightwalletdUrl,
   required String network,
   required String name,
-}) => RustLib.instance.api.crateApiNamesResolveNameV1(
+}) => RustLib.instance.api.crateApiNamesResolveName(
   dbPath: dbPath,
   lightwalletdUrl: lightwalletdUrl,
   network: network,
@@ -336,47 +310,41 @@ class ApiNamesRegistrationDraft {
 
 class ApiNamesResolution {
   final String status;
-  final Uint8List? record;
   final String? paymentAddress;
-  final BigInt? sequence;
   final BigInt? leaseExpiry;
   final BigInt? terminalHeight;
-  final Uint8List? stateCommitment;
+  final Uint8List? producerTxid;
+  final BigInt? producerHeight;
+  final BigInt? producerTxIndex;
+  final BigInt? producerActionIndex;
   final BigInt tipHeight;
-  final BigInt candidateBlockProbes;
-  final BigInt tailBlocksScanned;
-  final BigInt lineageBlockProbes;
-  final BigInt predecessorChainSteps;
+  final BigInt compactBlocksScanned;
 
   const ApiNamesResolution({
     required this.status,
-    this.record,
     this.paymentAddress,
-    this.sequence,
     this.leaseExpiry,
     this.terminalHeight,
-    this.stateCommitment,
+    this.producerTxid,
+    this.producerHeight,
+    this.producerTxIndex,
+    this.producerActionIndex,
     required this.tipHeight,
-    required this.candidateBlockProbes,
-    required this.tailBlocksScanned,
-    required this.lineageBlockProbes,
-    required this.predecessorChainSteps,
+    required this.compactBlocksScanned,
   });
 
   @override
   int get hashCode =>
       status.hashCode ^
-      record.hashCode ^
       paymentAddress.hashCode ^
-      sequence.hashCode ^
       leaseExpiry.hashCode ^
       terminalHeight.hashCode ^
-      stateCommitment.hashCode ^
+      producerTxid.hashCode ^
+      producerHeight.hashCode ^
+      producerTxIndex.hashCode ^
+      producerActionIndex.hashCode ^
       tipHeight.hashCode ^
-      candidateBlockProbes.hashCode ^
-      tailBlocksScanned.hashCode ^
-      lineageBlockProbes.hashCode ^
-      predecessorChainSteps.hashCode;
+      compactBlocksScanned.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -384,17 +352,15 @@ class ApiNamesResolution {
       other is ApiNamesResolution &&
           runtimeType == other.runtimeType &&
           status == other.status &&
-          record == other.record &&
           paymentAddress == other.paymentAddress &&
-          sequence == other.sequence &&
           leaseExpiry == other.leaseExpiry &&
           terminalHeight == other.terminalHeight &&
-          stateCommitment == other.stateCommitment &&
+          producerTxid == other.producerTxid &&
+          producerHeight == other.producerHeight &&
+          producerTxIndex == other.producerTxIndex &&
+          producerActionIndex == other.producerActionIndex &&
           tipHeight == other.tipHeight &&
-          candidateBlockProbes == other.candidateBlockProbes &&
-          tailBlocksScanned == other.tailBlocksScanned &&
-          lineageBlockProbes == other.lineageBlockProbes &&
-          predecessorChainSteps == other.predecessorChainSteps;
+          compactBlocksScanned == other.compactBlocksScanned;
 }
 
 /// Reviewed REVEAL proposal backed by an atomically consumed Rust capability.

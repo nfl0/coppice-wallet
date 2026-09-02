@@ -49,6 +49,10 @@ impl MemoryBlockSource {
         self.blocks
     }
 
+    pub(crate) fn blocks(&self) -> &[CompactBlock] {
+        &self.blocks
+    }
+
     /// Returns whether this source contains exactly the requested half-open
     /// range in ascending, contiguous order.
     pub(super) fn contains_exact_range(&self, start: u32, end: u32) -> bool {

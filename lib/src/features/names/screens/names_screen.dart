@@ -823,41 +823,36 @@ class _DeploymentParameterGrid extends StatelessWidget {
         _InfoRow(label: 'Profile', value: profile.label),
         _InfoRow(label: 'Network domain', value: profile.networkDomain),
         _InfoRow(
-          label: 'Runtime activation height',
-          value: profile.runtimeActivationHeight.toString(),
+          label: 'Activation height',
+          value: profile.activationHeight.toString(),
         ),
         _InfoRow(
-          label: 'Names activation height',
-          value: profile.namesActivationHeight.toString(),
+          label: 'Daily schedule (blocks)',
+          value: kNamesEpochBlocks.toString(),
         ),
-        _InfoRow(label: 'Epoch size', value: profile.epochSize.toString()),
+        _InfoRow(
+          label: 'Name window (blocks)',
+          value: kNamesWindowBlocks.toString(),
+        ),
+        _InfoRow(
+          label: 'Commit maturity (blocks)',
+          value: kNamesCommitMaturityBlocks.toString(),
+        ),
         _InfoRow(
           label: 'Commit TTL (blocks)',
-          value: profile.commitTtlBlocks.toString(),
-        ),
-        _InfoRow(
-          label: 'Refresh deadline (blocks)',
-          value: profile.refreshDeadlineBlocks.toString(),
+          value: kNamesCommitTtlBlocks.toString(),
         ),
         _InfoRow(
           label: 'Lease duration (blocks)',
-          value: profile.leaseDurationBlocks.toString(),
+          value: kNamesLeaseBlocks.toString(),
         ),
         _InfoRow(
-          label: 'Grace period (blocks)',
-          value: profile.gracePeriodBlocks.toString(),
+          label: 'Cooldown (blocks)',
+          value: kNamesCooldownBlocks.toString(),
         ),
         _InfoRow(
-          label: 'Reuse delay (blocks)',
-          value: profile.reuseDelayBlocks.toString(),
-        ),
-        _InfoRow(
-          label: 'Max record bytes',
-          value: profile.maxRecordBytes.toString(),
-        ),
-        _InfoRow(
-          label: 'Minimum bond (zatoshis)',
-          value: profile.minimumBondZatoshis.toString(),
+          label: 'Bond (zatoshis)',
+          value: kNamesBondZatoshis.toString(),
         ),
         _InfoRow(
           label: 'Retention (blocks)',
@@ -1167,6 +1162,7 @@ class _ManagedNamesCard extends StatelessWidget {
                               ),
                             if (item.phase == 'commit_proposed' ||
                                 item.phase == 'commit_broadcast' ||
+                                item.phase == 'window_missed' ||
                                 item.phase == 'commit_expired')
                               AppButton(
                                 variant: AppButtonVariant.secondary,
@@ -1251,12 +1247,12 @@ String _managedPhaseLabel(String phase) => switch (phase) {
   'commit_proposed' => 'COMMIT proposal awaiting wallet confirmation',
   'commit_broadcast' => 'COMMIT broadcast — awaiting canonical Names replay',
   'commit_accepted' => 'COMMIT accepted — REVEAL is available',
+  'window_missed' => 'Registration window missed — start again',
   'commit_expired' => 'COMMIT expired before REVEAL',
   'reveal_broadcast' => 'REVEAL broadcast — awaiting confirmation',
   'active' => 'Active',
-  'released' => 'Released',
-  'expired' => 'Lease expired',
-  'abandoned' => 'State note spent outside Names',
+  'cooldown' => 'Expired — reserved for the previous owner',
+  'claimable' => 'Available to register',
   _ => phase.replaceAll('_', ' '),
 };
 

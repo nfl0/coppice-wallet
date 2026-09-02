@@ -136,9 +136,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final revealButton = find.byKey(
-      const ValueKey(
-        'names_reveal_button_${_ReviewManagedNamesNotifier.name}',
-      ),
+      const ValueKey('names_reveal_button_${_ReviewManagedNamesNotifier.name}'),
     );
     await tester.ensureVisible(revealButton);
     await tester.tap(revealButton);

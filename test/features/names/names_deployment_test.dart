@@ -22,25 +22,25 @@ void main() {
     expect(namesDeploymentProfileForNetwork('nonsense'), isNull);
   });
 
-  test('the regtest profile matches the Rust live-smoke deployment', () {
-    // Values must stay aligned with rust/src/wallet/tests/coppice.rs
-    // (live_zaino_bootstrap_and_missing_resolution): activation 2/2,
-    // epoch 8, TTL 15, refresh 16, lease 32, grace 3, reuse 4, record 1024,
-    // bond 1, retention 128, domain coppice-runtime-regtest-v1.
-    const profile = kLocalRegtestNamesDeploymentProfile;
-    expect(profile.runtimeActivationHeight, 2);
-    expect(profile.namesActivationHeight, 2);
-    expect(profile.epochSize, 8);
-    expect(profile.commitTtlBlocks, 15);
-    expect(profile.refreshDeadlineBlocks, 16);
-    expect(profile.leaseDurationBlocks, 32);
-    expect(profile.gracePeriodBlocks, 3);
-    expect(profile.reuseDelayBlocks, 4);
-    expect(profile.maxRecordBytes, 1024);
-    expect(profile.minimumBondZatoshis, 1);
-    expect(profile.retentionBlocks, 128);
-    expect(profile.networkDomain, 'coppice-runtime-regtest-v1');
-    expect(profile.rendezvousIvkHex.length, 128);
-    expect(profile.rendezvousReceiverHex.length, 86);
+  test(
+    'the regtest profile contains only deployment identity and replay policy',
+    () {
+      const profile = kLocalRegtestNamesDeploymentProfile;
+      expect(profile.activationHeight, 2);
+      expect(profile.retentionBlocks, 128);
+      expect(profile.networkDomain, 'coppice-runtime-regtest-v1');
+      expect(profile.rendezvousIvkHex.length, 128);
+      expect(profile.rendezvousReceiverHex.length, 86);
+    },
+  );
+
+  test('replacement protocol constants match the Rust deployment rules', () {
+    expect(kNamesEpochBlocks, 1152);
+    expect(kNamesWindowBlocks, 24);
+    expect(kNamesCommitMaturityBlocks, 24);
+    expect(kNamesCommitTtlBlocks, 192);
+    expect(kNamesLeaseBlocks, 250000);
+    expect(kNamesCooldownBlocks, 1152);
+    expect(kNamesBondZatoshis, 100000000);
   });
 }

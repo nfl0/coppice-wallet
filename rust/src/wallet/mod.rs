@@ -2,6 +2,7 @@ use std::num::NonZeroU32;
 
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 
+#[path = "coppice_replacement.rs"]
 pub(crate) mod coppice;
 pub(crate) mod db;
 pub mod keys;

@@ -81,7 +81,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1713330816;
+  int get rustContentHash => 116312707;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -126,7 +126,7 @@ abstract class RustLibApi extends BaseApi {
     required List<String> newUrls,
   });
 
-  Future<ApiNamesCommitProposal> crateApiNamesBeginNamesV1Registration({
+  Future<ApiNamesCommitProposal> crateApiNamesBeginNamesRegistration({
     required String dbPath,
     required String network,
     required String accountUuid,
@@ -136,7 +136,7 @@ abstract class RustLibApi extends BaseApi {
     required List<int> mnemonicBytes,
   });
 
-  Future<ApiNamesRevealProposal> crateApiNamesBeginNamesV1Reveal({
+  Future<ApiNamesRevealProposal> crateApiNamesBeginNamesReveal({
     required String dbPath,
     required String lightwalletdUrl,
     required String network,
@@ -148,7 +148,7 @@ abstract class RustLibApi extends BaseApi {
 
   void crateApiNetworkPrivacyBeginNetworkPrivacyEnable();
 
-  Future<ApiNamesWalletStatus> crateApiNamesBootstrapNamesV1({
+  Future<ApiNamesWalletStatus> crateApiNamesBootstrapNames({
     required String dbPath,
     required String lightwalletdUrl,
     required String network,
@@ -274,23 +274,10 @@ abstract class RustLibApi extends BaseApi {
     required bool enabled,
   });
 
-  ApiNamesWalletStatus crateApiNamesConfigureNamesV1({
+  ApiNamesWalletStatus crateApiNamesConfigureNames({
     required String dbPath,
     required String network,
-    required BigInt runtimeActivationHeight,
-    required BigInt namesActivationHeight,
-    required BigInt epochSize,
-    required BigInt commitTtlBlocks,
-    required BigInt refreshDeadlineBlocks,
-    required BigInt leaseDurationBlocks,
-    required BigInt gracePeriodBlocks,
-    required BigInt reuseDelayBlocks,
-    required BigInt maxRecordBytes,
-    required BigInt minimumBondZatoshis,
     required BigInt retentionBlocks,
-    required String networkDomain,
-    required String rendezvousIvkHex,
-    required String rendezvousReceiverHex,
   });
 
   Future<NetworkPrivacyStatus> crateApiNetworkPrivacyConfigureNetworkPrivacy({
@@ -439,7 +426,7 @@ abstract class RustLibApi extends BaseApi {
     required String requestId,
   });
 
-  void crateApiNamesDiscardNamesV1RegistrationWorkflow({
+  void crateApiNamesDiscardNamesRegistrationWorkflow({
     required String dbPath,
     required String network,
     required String accountUuid,
@@ -628,19 +615,19 @@ abstract class RustLibApi extends BaseApi {
     required String lightwalletdUrl,
   });
 
-  List<ApiManagedName> crateApiNamesGetManagedNamesV1({
+  List<ApiManagedName> crateApiNamesGetManagedNames({
     required String dbPath,
     required String network,
     required String accountUuid,
   });
 
-  ApiNamesBondStatus crateApiNamesGetNamesV1BondStatus({
+  ApiNamesBondStatus crateApiNamesGetNamesBondStatus({
     required String dbPath,
     required String network,
     required String accountUuid,
   });
 
-  ApiNamesWalletStatus crateApiNamesGetNamesV1Status({
+  ApiNamesWalletStatus crateApiNamesGetNamesStatus({
     required String dbPath,
     required String network,
   });
@@ -846,7 +833,7 @@ abstract class RustLibApi extends BaseApi {
     required List<String> accountUuids,
   });
 
-  Future<Uint8List> crateApiNamesManageNameV1({
+  Future<Uint8List> crateApiNamesManageName({
     required String dbPath,
     required String lightwalletdUrl,
     required String network,
@@ -956,8 +943,7 @@ abstract class RustLibApi extends BaseApi {
     required String pirServerUrl,
   });
 
-  Future<ApiNamesRegistrationDraft>
-  crateApiNamesPrepareNamesV1RegistrationDraft({
+  Future<ApiNamesRegistrationDraft> crateApiNamesPrepareNamesRegistrationDraft({
     required String dbPath,
     required String network,
     required String accountUuid,
@@ -1100,7 +1086,7 @@ abstract class RustLibApi extends BaseApi {
     String? roundId,
   });
 
-  Future<ApiNamesResolution> crateApiNamesResolveNameV1({
+  Future<ApiNamesResolution> crateApiNamesResolveName({
     required String dbPath,
     required String lightwalletdUrl,
     required String network,
@@ -1132,7 +1118,7 @@ abstract class RustLibApi extends BaseApi {
     required String expectedRunId,
   });
 
-  Future<Uint8List> crateApiNamesRevealNamesV1Registration({
+  Future<Uint8List> crateApiNamesRevealNamesRegistration({
     required String dbPath,
     required String lightwalletdUrl,
     required String network,
@@ -1594,7 +1580,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<ApiNamesCommitProposal> crateApiNamesBeginNamesV1Registration({
+  Future<ApiNamesCommitProposal> crateApiNamesBeginNamesRegistration({
     required String dbPath,
     required String network,
     required String accountUuid,
@@ -1625,7 +1611,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_api_names_commit_proposal,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiNamesBeginNamesV1RegistrationConstMeta,
+        constMeta: kCrateApiNamesBeginNamesRegistrationConstMeta,
         argValues: [
           dbPath,
           network,
@@ -1640,9 +1626,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     );
   }
 
-  TaskConstMeta get kCrateApiNamesBeginNamesV1RegistrationConstMeta =>
+  TaskConstMeta get kCrateApiNamesBeginNamesRegistrationConstMeta =>
       const TaskConstMeta(
-        debugName: "begin_names_v1_registration",
+        debugName: "begin_names_registration",
         argNames: [
           "dbPath",
           "network",
@@ -1655,7 +1641,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<ApiNamesRevealProposal> crateApiNamesBeginNamesV1Reveal({
+  Future<ApiNamesRevealProposal> crateApiNamesBeginNamesReveal({
     required String dbPath,
     required String lightwalletdUrl,
     required String network,
@@ -1686,7 +1672,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_api_names_reveal_proposal,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiNamesBeginNamesV1RevealConstMeta,
+        constMeta: kCrateApiNamesBeginNamesRevealConstMeta,
         argValues: [
           dbPath,
           lightwalletdUrl,
@@ -1701,9 +1687,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     );
   }
 
-  TaskConstMeta get kCrateApiNamesBeginNamesV1RevealConstMeta =>
+  TaskConstMeta get kCrateApiNamesBeginNamesRevealConstMeta =>
       const TaskConstMeta(
-        debugName: "begin_names_v1_reveal",
+        debugName: "begin_names_reveal",
         argNames: [
           "dbPath",
           "lightwalletdUrl",
@@ -1741,7 +1727,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<ApiNamesWalletStatus> crateApiNamesBootstrapNamesV1({
+  Future<ApiNamesWalletStatus> crateApiNamesBootstrapNames({
     required String dbPath,
     required String lightwalletdUrl,
     required String network,
@@ -1764,16 +1750,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_api_names_wallet_status,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiNamesBootstrapNamesV1ConstMeta,
+        constMeta: kCrateApiNamesBootstrapNamesConstMeta,
         argValues: [dbPath, lightwalletdUrl, network],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiNamesBootstrapNamesV1ConstMeta =>
+  TaskConstMeta get kCrateApiNamesBootstrapNamesConstMeta =>
       const TaskConstMeta(
-        debugName: "bootstrap_names_v1",
+        debugName: "bootstrap_names",
         argNames: ["dbPath", "lightwalletdUrl", "network"],
       );
 
@@ -2549,23 +2535,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  ApiNamesWalletStatus crateApiNamesConfigureNamesV1({
+  ApiNamesWalletStatus crateApiNamesConfigureNames({
     required String dbPath,
     required String network,
-    required BigInt runtimeActivationHeight,
-    required BigInt namesActivationHeight,
-    required BigInt epochSize,
-    required BigInt commitTtlBlocks,
-    required BigInt refreshDeadlineBlocks,
-    required BigInt leaseDurationBlocks,
-    required BigInt gracePeriodBlocks,
-    required BigInt reuseDelayBlocks,
-    required BigInt maxRecordBytes,
-    required BigInt minimumBondZatoshis,
     required BigInt retentionBlocks,
-    required String networkDomain,
-    required String rendezvousIvkHex,
-    required String rendezvousReceiverHex,
   }) {
     return handler.executeSync(
       SyncTask(
@@ -2573,71 +2546,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(dbPath, serializer);
           sse_encode_String(network, serializer);
-          sse_encode_u_64(runtimeActivationHeight, serializer);
-          sse_encode_u_64(namesActivationHeight, serializer);
-          sse_encode_u_64(epochSize, serializer);
-          sse_encode_u_64(commitTtlBlocks, serializer);
-          sse_encode_u_64(refreshDeadlineBlocks, serializer);
-          sse_encode_u_64(leaseDurationBlocks, serializer);
-          sse_encode_u_64(gracePeriodBlocks, serializer);
-          sse_encode_u_64(reuseDelayBlocks, serializer);
-          sse_encode_u_64(maxRecordBytes, serializer);
-          sse_encode_u_64(minimumBondZatoshis, serializer);
           sse_encode_u_64(retentionBlocks, serializer);
-          sse_encode_String(networkDomain, serializer);
-          sse_encode_String(rendezvousIvkHex, serializer);
-          sse_encode_String(rendezvousReceiverHex, serializer);
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 23)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_api_names_wallet_status,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiNamesConfigureNamesV1ConstMeta,
-        argValues: [
-          dbPath,
-          network,
-          runtimeActivationHeight,
-          namesActivationHeight,
-          epochSize,
-          commitTtlBlocks,
-          refreshDeadlineBlocks,
-          leaseDurationBlocks,
-          gracePeriodBlocks,
-          reuseDelayBlocks,
-          maxRecordBytes,
-          minimumBondZatoshis,
-          retentionBlocks,
-          networkDomain,
-          rendezvousIvkHex,
-          rendezvousReceiverHex,
-        ],
+        constMeta: kCrateApiNamesConfigureNamesConstMeta,
+        argValues: [dbPath, network, retentionBlocks],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiNamesConfigureNamesV1ConstMeta =>
+  TaskConstMeta get kCrateApiNamesConfigureNamesConstMeta =>
       const TaskConstMeta(
-        debugName: "configure_names_v1",
-        argNames: [
-          "dbPath",
-          "network",
-          "runtimeActivationHeight",
-          "namesActivationHeight",
-          "epochSize",
-          "commitTtlBlocks",
-          "refreshDeadlineBlocks",
-          "leaseDurationBlocks",
-          "gracePeriodBlocks",
-          "reuseDelayBlocks",
-          "maxRecordBytes",
-          "minimumBondZatoshis",
-          "retentionBlocks",
-          "networkDomain",
-          "rendezvousIvkHex",
-          "rendezvousReceiverHex",
-        ],
+        debugName: "configure_names",
+        argNames: ["dbPath", "network", "retentionBlocks"],
       );
 
   @override
@@ -3648,7 +3574,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  void crateApiNamesDiscardNamesV1RegistrationWorkflow({
+  void crateApiNamesDiscardNamesRegistrationWorkflow({
     required String dbPath,
     required String network,
     required String accountUuid,
@@ -3668,16 +3594,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_unit,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiNamesDiscardNamesV1RegistrationWorkflowConstMeta,
+        constMeta: kCrateApiNamesDiscardNamesRegistrationWorkflowConstMeta,
         argValues: [dbPath, network, accountUuid, name],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiNamesDiscardNamesV1RegistrationWorkflowConstMeta =>
+  TaskConstMeta get kCrateApiNamesDiscardNamesRegistrationWorkflowConstMeta =>
       const TaskConstMeta(
-        debugName: "discard_names_v1_registration_workflow",
+        debugName: "discard_names_registration_workflow",
         argNames: ["dbPath", "network", "accountUuid", "name"],
       );
 
@@ -4887,7 +4813,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  List<ApiManagedName> crateApiNamesGetManagedNamesV1({
+  List<ApiManagedName> crateApiNamesGetManagedNames({
     required String dbPath,
     required String network,
     required String accountUuid,
@@ -4905,21 +4831,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_list_api_managed_name,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiNamesGetManagedNamesV1ConstMeta,
+        constMeta: kCrateApiNamesGetManagedNamesConstMeta,
         argValues: [dbPath, network, accountUuid],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiNamesGetManagedNamesV1ConstMeta =>
+  TaskConstMeta get kCrateApiNamesGetManagedNamesConstMeta =>
       const TaskConstMeta(
-        debugName: "get_managed_names_v1",
+        debugName: "get_managed_names",
         argNames: ["dbPath", "network", "accountUuid"],
       );
 
   @override
-  ApiNamesBondStatus crateApiNamesGetNamesV1BondStatus({
+  ApiNamesBondStatus crateApiNamesGetNamesBondStatus({
     required String dbPath,
     required String network,
     required String accountUuid,
@@ -4937,21 +4863,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_api_names_bond_status,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiNamesGetNamesV1BondStatusConstMeta,
+        constMeta: kCrateApiNamesGetNamesBondStatusConstMeta,
         argValues: [dbPath, network, accountUuid],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiNamesGetNamesV1BondStatusConstMeta =>
+  TaskConstMeta get kCrateApiNamesGetNamesBondStatusConstMeta =>
       const TaskConstMeta(
-        debugName: "get_names_v1_bond_status",
+        debugName: "get_names_bond_status",
         argNames: ["dbPath", "network", "accountUuid"],
       );
 
   @override
-  ApiNamesWalletStatus crateApiNamesGetNamesV1Status({
+  ApiNamesWalletStatus crateApiNamesGetNamesStatus({
     required String dbPath,
     required String network,
   }) {
@@ -4967,16 +4893,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_api_names_wallet_status,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiNamesGetNamesV1StatusConstMeta,
+        constMeta: kCrateApiNamesGetNamesStatusConstMeta,
         argValues: [dbPath, network],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiNamesGetNamesV1StatusConstMeta =>
+  TaskConstMeta get kCrateApiNamesGetNamesStatusConstMeta =>
       const TaskConstMeta(
-        debugName: "get_names_v1_status",
+        debugName: "get_names_status",
         argNames: ["dbPath", "network"],
       );
 
@@ -6317,7 +6243,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<Uint8List> crateApiNamesManageNameV1({
+  Future<Uint8List> crateApiNamesManageName({
     required String dbPath,
     required String lightwalletdUrl,
     required String network,
@@ -6350,7 +6276,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_list_prim_u_8_strict,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiNamesManageNameV1ConstMeta,
+        constMeta: kCrateApiNamesManageNameConstMeta,
         argValues: [
           dbPath,
           lightwalletdUrl,
@@ -6366,8 +6292,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     );
   }
 
-  TaskConstMeta get kCrateApiNamesManageNameV1ConstMeta => const TaskConstMeta(
-    debugName: "manage_name_v1",
+  TaskConstMeta get kCrateApiNamesManageNameConstMeta => const TaskConstMeta(
+    debugName: "manage_name",
     argNames: [
       "dbPath",
       "lightwalletdUrl",
@@ -6984,8 +6910,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<ApiNamesRegistrationDraft>
-  crateApiNamesPrepareNamesV1RegistrationDraft({
+  Future<ApiNamesRegistrationDraft> crateApiNamesPrepareNamesRegistrationDraft({
     required String dbPath,
     required String network,
     required String accountUuid,
@@ -7014,7 +6939,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_api_names_registration_draft,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiNamesPrepareNamesV1RegistrationDraftConstMeta,
+        constMeta: kCrateApiNamesPrepareNamesRegistrationDraftConstMeta,
         argValues: [
           dbPath,
           network,
@@ -7028,9 +6953,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     );
   }
 
-  TaskConstMeta get kCrateApiNamesPrepareNamesV1RegistrationDraftConstMeta =>
+  TaskConstMeta get kCrateApiNamesPrepareNamesRegistrationDraftConstMeta =>
       const TaskConstMeta(
-        debugName: "prepare_names_v1_registration_draft",
+        debugName: "prepare_names_registration_draft",
         argNames: [
           "dbPath",
           "network",
@@ -7906,7 +7831,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<ApiNamesResolution> crateApiNamesResolveNameV1({
+  Future<ApiNamesResolution> crateApiNamesResolveName({
     required String dbPath,
     required String lightwalletdUrl,
     required String network,
@@ -7931,15 +7856,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_api_names_resolution,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiNamesResolveNameV1ConstMeta,
+        constMeta: kCrateApiNamesResolveNameConstMeta,
         argValues: [dbPath, lightwalletdUrl, network, name],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiNamesResolveNameV1ConstMeta => const TaskConstMeta(
-    debugName: "resolve_name_v1",
+  TaskConstMeta get kCrateApiNamesResolveNameConstMeta => const TaskConstMeta(
+    debugName: "resolve_name",
     argNames: ["dbPath", "lightwalletdUrl", "network", "name"],
   );
 
@@ -8109,7 +8034,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<Uint8List> crateApiNamesRevealNamesV1Registration({
+  Future<Uint8List> crateApiNamesRevealNamesRegistration({
     required String dbPath,
     required String lightwalletdUrl,
     required String network,
@@ -8138,7 +8063,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_list_prim_u_8_strict,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiNamesRevealNamesV1RegistrationConstMeta,
+        constMeta: kCrateApiNamesRevealNamesRegistrationConstMeta,
         argValues: [
           dbPath,
           lightwalletdUrl,
@@ -8152,9 +8077,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     );
   }
 
-  TaskConstMeta get kCrateApiNamesRevealNamesV1RegistrationConstMeta =>
+  TaskConstMeta get kCrateApiNamesRevealNamesRegistrationConstMeta =>
       const TaskConstMeta(
-        debugName: "reveal_names_v1_registration",
+        debugName: "reveal_names_registration",
         argNames: [
           "dbPath",
           "lightwalletdUrl",
@@ -10036,21 +9961,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ApiNamesResolution dco_decode_api_names_resolution(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 12)
-      throw Exception('unexpected arr length: expect 12 but see ${arr.length}');
+    if (arr.length != 10)
+      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
     return ApiNamesResolution(
       status: dco_decode_String(arr[0]),
-      record: dco_decode_opt_list_prim_u_8_strict(arr[1]),
-      paymentAddress: dco_decode_opt_String(arr[2]),
-      sequence: dco_decode_opt_box_autoadd_u_64(arr[3]),
-      leaseExpiry: dco_decode_opt_box_autoadd_u_64(arr[4]),
-      terminalHeight: dco_decode_opt_box_autoadd_u_64(arr[5]),
-      stateCommitment: dco_decode_opt_list_prim_u_8_strict(arr[6]),
-      tipHeight: dco_decode_u_64(arr[7]),
-      candidateBlockProbes: dco_decode_u_64(arr[8]),
-      tailBlocksScanned: dco_decode_u_64(arr[9]),
-      lineageBlockProbes: dco_decode_u_64(arr[10]),
-      predecessorChainSteps: dco_decode_u_64(arr[11]),
+      paymentAddress: dco_decode_opt_String(arr[1]),
+      leaseExpiry: dco_decode_opt_box_autoadd_u_64(arr[2]),
+      terminalHeight: dco_decode_opt_box_autoadd_u_64(arr[3]),
+      producerTxid: dco_decode_opt_list_prim_u_8_strict(arr[4]),
+      producerHeight: dco_decode_opt_box_autoadd_u_64(arr[5]),
+      producerTxIndex: dco_decode_opt_box_autoadd_u_64(arr[6]),
+      producerActionIndex: dco_decode_opt_box_autoadd_u_64(arr[7]),
+      tipHeight: dco_decode_u_64(arr[8]),
+      compactBlocksScanned: dco_decode_u_64(arr[9]),
     );
   }
 
@@ -12801,30 +12724,26 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_status = sse_decode_String(deserializer);
-    var var_record = sse_decode_opt_list_prim_u_8_strict(deserializer);
     var var_paymentAddress = sse_decode_opt_String(deserializer);
-    var var_sequence = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_leaseExpiry = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_terminalHeight = sse_decode_opt_box_autoadd_u_64(deserializer);
-    var var_stateCommitment = sse_decode_opt_list_prim_u_8_strict(deserializer);
+    var var_producerTxid = sse_decode_opt_list_prim_u_8_strict(deserializer);
+    var var_producerHeight = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_producerTxIndex = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_producerActionIndex = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_tipHeight = sse_decode_u_64(deserializer);
-    var var_candidateBlockProbes = sse_decode_u_64(deserializer);
-    var var_tailBlocksScanned = sse_decode_u_64(deserializer);
-    var var_lineageBlockProbes = sse_decode_u_64(deserializer);
-    var var_predecessorChainSteps = sse_decode_u_64(deserializer);
+    var var_compactBlocksScanned = sse_decode_u_64(deserializer);
     return ApiNamesResolution(
       status: var_status,
-      record: var_record,
       paymentAddress: var_paymentAddress,
-      sequence: var_sequence,
       leaseExpiry: var_leaseExpiry,
       terminalHeight: var_terminalHeight,
-      stateCommitment: var_stateCommitment,
+      producerTxid: var_producerTxid,
+      producerHeight: var_producerHeight,
+      producerTxIndex: var_producerTxIndex,
+      producerActionIndex: var_producerActionIndex,
       tipHeight: var_tipHeight,
-      candidateBlockProbes: var_candidateBlockProbes,
-      tailBlocksScanned: var_tailBlocksScanned,
-      lineageBlockProbes: var_lineageBlockProbes,
-      predecessorChainSteps: var_predecessorChainSteps,
+      compactBlocksScanned: var_compactBlocksScanned,
     );
   }
 
@@ -16364,17 +16283,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.status, serializer);
-    sse_encode_opt_list_prim_u_8_strict(self.record, serializer);
     sse_encode_opt_String(self.paymentAddress, serializer);
-    sse_encode_opt_box_autoadd_u_64(self.sequence, serializer);
     sse_encode_opt_box_autoadd_u_64(self.leaseExpiry, serializer);
     sse_encode_opt_box_autoadd_u_64(self.terminalHeight, serializer);
-    sse_encode_opt_list_prim_u_8_strict(self.stateCommitment, serializer);
+    sse_encode_opt_list_prim_u_8_strict(self.producerTxid, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.producerHeight, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.producerTxIndex, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.producerActionIndex, serializer);
     sse_encode_u_64(self.tipHeight, serializer);
-    sse_encode_u_64(self.candidateBlockProbes, serializer);
-    sse_encode_u_64(self.tailBlocksScanned, serializer);
-    sse_encode_u_64(self.lineageBlockProbes, serializer);
-    sse_encode_u_64(self.predecessorChainSteps, serializer);
+    sse_encode_u_64(self.compactBlocksScanned, serializer);
   }
 
   @protected

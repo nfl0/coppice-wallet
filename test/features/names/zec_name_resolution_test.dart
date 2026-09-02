@@ -8,17 +8,15 @@ rust_names.ApiNamesResolution resolution(
 }) {
   return rust_names.ApiNamesResolution(
     status: status,
-    record: null,
     paymentAddress: paymentAddress,
-    sequence: BigInt.from(3),
     leaseExpiry: BigInt.from(120),
     terminalHeight: null,
-    stateCommitment: null,
+    producerTxid: null,
+    producerHeight: null,
+    producerTxIndex: null,
+    producerActionIndex: null,
     tipHeight: BigInt.from(100),
-    candidateBlockProbes: BigInt.zero,
-    tailBlocksScanned: BigInt.zero,
-    lineageBlockProbes: BigInt.zero,
-    predecessorChainSteps: BigInt.zero,
+    compactBlocksScanned: BigInt.zero,
   );
 }
 
@@ -117,15 +115,7 @@ void main() {
     });
 
     test('every non-active lifecycle is refused with user-facing text', () {
-      const statuses = [
-        'stale',
-        'grace',
-        'released',
-        'abandoned',
-        'expired',
-        'missing',
-        'surprise',
-      ];
+      const statuses = ['cooldown', 'claimable', 'missing', 'surprise'];
       for (final status in statuses) {
         expect(
           () => zecNameResolutionFromApi('alice.zec', resolution(status)),

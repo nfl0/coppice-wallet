@@ -4,9 +4,13 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 use futures::{stream, StreamExt, TryStreamExt};
+use incrementalmerkletree::{Level, Position, Retention};
 use nonempty::NonEmpty;
 use rusqlite::{params, OptionalExtension};
-use shardtree::error::{InsertionError, QueryError, ShardTreeError};
+use shardtree::{
+    error::{InsertionError, QueryError, ShardTreeError},
+    LocatedPrunableTree,
+};
 use tonic::transport::Channel;
 use zcash_client_backend::data_api::{
     chain::{self, error::Error as ChainError, scan_cached_blocks},
@@ -49,6 +53,45 @@ mod enhance;
 mod error;
 mod lwd;
 pub(crate) mod mempool;
+
+enum AtomicScanError {
+    Chain(ChainError<SqliteClientError, block_source::MemoryBlockSourceError>),
+    Sqlite(SqliteClientError),
+}
+
+impl From<rusqlite::Error> for AtomicScanError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sqlite(SqliteClientError::DbError(error))
+    }
+}
+
+fn marked_names_leaf_fragment(
+    position: u32,
+    commitment: [u8; 32],
+) -> Result<
+    (
+        LocatedPrunableTree<orchard::tree::MerkleHashOrchard>,
+        std::collections::BTreeMap<BlockHeight, Position>,
+    ),
+    SqliteClientError,
+> {
+    let hash = Option::<orchard::tree::MerkleHashOrchard>::from(
+        orchard::tree::MerkleHashOrchard::from_bytes(&commitment),
+    )
+    .ok_or_else(|| {
+        SqliteClientError::CorruptedData("Names successor commitment is noncanonical".into())
+    })?;
+    let position = Position::from(u64::from(position));
+    let result = LocatedPrunableTree::from_iter::<BlockHeight, _>(
+        position..position + 1,
+        Level::new(0),
+        std::iter::once((hash, Retention::Marked)),
+    )
+    .ok_or_else(|| {
+        SqliteClientError::CorruptedData("cannot construct marked Names tree fragment".into())
+    })?;
+    Ok((result.subtree, result.checkpoints))
+}
 
 use enhance::run_enhancement;
 pub(crate) use error::SyncError;
@@ -2304,9 +2347,17 @@ async fn run_sync_impl(
     // Open DB once — reused for the entire sync
     let mut db =
         with_wallet_db_write_lock("sync_engine.open_db", || open_db(db_data_path, network))?;
-    // Coppice Names is an optional derived host. A malformed or stale
-    // application sidecar must never poison the ordinary wallet scanner;
-    // it is reported and rebuilt explicitly through the Names API.
+    // Coppice Names is normally an optional derived host. Once this wallet has
+    // an owned-name workflow, however, the host becomes custody-sensitive:
+    // scanning without it could prune a newly mined hidden bond witness.
+    let names_scan_required = crate::wallet::coppice::requires_managed_scanning(db_data_path)
+        .map_err(|error| {
+            SyncError::other(format!("inspect Coppice Names custody state: {error}"))
+        })?;
+    let names_activation_height = names_scan_required
+        .then(|| crate::wallet::coppice::managed_activation_height(db_data_path, network))
+        .transpose()
+        .map_err(|error| SyncError::other(format!("read Coppice Names deployment: {error}")))?;
     let mut names_host = match crate::wallet::coppice::load_for_sync(db_data_path, network) {
         Ok(host) => host,
         Err(error) => {
@@ -3115,6 +3166,83 @@ async fn run_sync_impl(
         // becomes `SyncError::Db` (Fatal). Everything else (non-scan,
         // non-wallet — e.g. block-source errors, unrecognised scan
         // variants) becomes `SyncError::Other` (retry-with-backoff).
+        // Names replay is prepared on a fork before the SQL transaction. It
+        // authenticates all Ironwood action positions and identifies state
+        // bonds without mutating either the live host or wallet tree.
+        let mut names_host_failed = false;
+        let names_blocks = block_source
+            .blocks()
+            .iter()
+            .filter(|block| {
+                names_activation_height.is_none_or(|activation| {
+                    u32::try_from(block.height).is_ok_and(|height| height >= activation)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let first_names_height = names_blocks
+            .first()
+            .and_then(|block| u32::try_from(block.height).ok());
+        if names_scan_required && first_names_height.is_some() {
+            let first_height = first_names_height.expect("checked present");
+            let target_height = first_height
+                .checked_sub(1)
+                .ok_or_else(|| SyncError::other("wallet scan batch has no predecessor height"))?;
+            crate::wallet::coppice::ensure_for_managed_scan(
+                db_data_path,
+                network,
+                &mut client,
+                &mut names_host,
+                target_height,
+            )
+            .await
+            .map_err(|error| {
+                SyncError::other(format!(
+                    "prepare custody-sensitive Coppice Names scan: {error}"
+                ))
+            })?;
+        }
+        let prepared_names = if first_names_height.is_none() {
+            None
+        } else if let Some(host) = names_host.as_ref() {
+            if first_names_height.is_some_and(|height| host.can_apply_start(height)) {
+                let mut candidate = host.fork();
+                match candidate
+                    .apply_compact_blocks(&mut client, names_blocks)
+                    .await
+                {
+                    Ok(deltas) => Some((candidate, deltas)),
+                    Err(error) => {
+                        if names_scan_required {
+                            return Err(SyncError::other(format!(
+                                "custody-sensitive Coppice Names replay failed before wallet scan: {error}"
+                            )));
+                        }
+                        log::warn!(
+                            "[{}] sync: disabling Coppice Names host after speculative batch failure: {error}",
+                            elapsed()
+                        );
+                        names_host_failed = true;
+                        None
+                    }
+                }
+            } else {
+                if names_scan_required {
+                    return Err(SyncError::other(
+                        "custody-sensitive Coppice Names host is non-contiguous before wallet scan",
+                    ));
+                }
+                log::warn!(
+                    "[{}] sync: disabling non-contiguous Coppice Names host before wallet batch",
+                    elapsed()
+                );
+                names_host_failed = true;
+                None
+            }
+        } else {
+            None
+        };
+
         let scan_result = with_wallet_db_write_lock("sync_engine.retain_and_scan_blocks", || {
             if let Some(incoming_checkpoint_heights) = &incoming_orchard_checkpoint_heights {
                 let retained =
@@ -3138,14 +3266,68 @@ async fn run_sync_impl(
                     );
                 }
             }
-            scan_cached_blocks(
-                &network,
-                &block_source,
-                &mut db,
-                start,
-                &from_state,
-                batch_blocks as usize,
-            )
+            db.transactionally(|tx_db| {
+                let summary = scan_cached_blocks(
+                    &network,
+                    &block_source,
+                    tx_db,
+                    start,
+                    &from_state,
+                    batch_blocks as usize,
+                )
+                .map_err(AtomicScanError::Chain)?;
+                if let Some((_, deltas)) = &prepared_names {
+                    tx_db
+                        .with_ironwood_tree_mut(|tree| -> Result<(), SqliteClientError> {
+                            for delta in deltas {
+                                for (leaf_index, leaf) in
+                                    delta.leaves.iter().enumerate().filter(|(_, leaf)| leaf.mark)
+                                {
+                                    let position = delta
+                                        .block_start_position
+                                        .ok_or_else(|| {
+                                            SqliteClientError::CorruptedData(
+                                                "marked Names block has no Ironwood start position"
+                                                    .into(),
+                                            )
+                                        })?
+                                        .checked_add(
+                                            u32::try_from(leaf_index).unwrap_or(u32::MAX),
+                                        )
+                                        .ok_or_else(|| {
+                                            SqliteClientError::CorruptedData(
+                                                "Names action position overflow".into(),
+                                            )
+                                        })?;
+                                    let (subtree, checkpoints) =
+                                        marked_names_leaf_fragment(position, leaf.commitment)?;
+                                    tree.insert_tree(subtree, checkpoints)
+                                        .map_err(SqliteClientError::from)?;
+                                }
+                                let checkpoint = BlockHeight::from_u32(delta.height);
+                                for position in &delta.remove_marks {
+                                    tree.remove_mark(
+                                        Position::from(u64::from(*position)),
+                                        Some(&checkpoint),
+                                    )
+                                    .map_err(SqliteClientError::from)?;
+                                }
+                            }
+                            Ok(())
+                        })
+                        .map_err(AtomicScanError::Sqlite)?
+                        .ok_or_else(|| {
+                            AtomicScanError::Sqlite(SqliteClientError::CorruptedData(
+                                "Ironwood commitment tree is unavailable".into(),
+                            ))
+                        })?;
+                }
+                Ok(summary)
+            })
+            .map_err(|error| match error {
+                AtomicScanError::Chain(error) => error,
+                AtomicScanError::Sqlite(error) => ChainError::Wallet(error),
+            })
             .map_err(|e| match e {
                 ChainError::Scan(scan_err) if scan_err.is_continuity_error() => {
                     let at_height = u32::from(scan_err.at_height()) as u64;
@@ -3355,48 +3537,19 @@ async fn run_sync_impl(
             },
         };
 
-        // Feed the exact scanner-accepted compact bytes into the optional
-        // Coppice host. This is deliberately post-scan: application replay
-        // cannot advance on a batch that the wallet DB rejected or rewound.
-        let mut names_host_failed = false;
-        if let Some(host) = names_host.as_mut() {
-            let names_blocks = block_source.into_blocks();
-            let first_height = names_blocks
-                .first()
-                .and_then(|block| u32::try_from(block.height).ok());
-            if let Some(first_height) = first_height {
-                if host.can_apply_start(first_height) {
-                    if let Err(error) = host.apply_compact_blocks(&mut client, names_blocks).await {
-                        log::warn!(
-                            "[{}] sync: disabling Coppice Names host after batch failure: {error}",
-                            elapsed()
-                        );
-                        names_host_failed = true;
-                    } else if let Err(error) =
-                        crate::wallet::coppice::persist_for_sync(db_data_path, host)
-                    {
-                        log::warn!(
-                            "[{}] sync: disabling Coppice Names host after checkpoint failure: {error}",
-                            elapsed()
-                        );
-                        names_host_failed = true;
-                    } else if let Err(error) = crate::wallet::names_lifecycle::protect_managed_heads(
-                        db_data_path,
-                        network,
-                        host,
-                    ) {
-                        log::warn!(
-                            "[{}] sync: could not protect managed Coppice Names state notes: {error}",
-                            elapsed()
-                        );
-                        names_host_failed = true;
-                    }
-                } else {
-                    log::debug!(
-                        "[{}] sync: Coppice Names host is not contiguous with wallet batch at {}; leaving it unchanged",
-                        elapsed(),
-                        first_height
+        // The wallet transaction accepted both the scan and Names mark
+        // changes. Only now publish and persist the prepared host fork.
+        if let Some((candidate, deltas)) = prepared_names {
+            names_host = Some(candidate);
+            if let Some(host) = names_host.as_ref() {
+                if let Err(error) =
+                    crate::wallet::coppice::persist_after_scan(db_data_path, host, &deltas)
+                {
+                    log::warn!(
+                        "[{}] sync: disabling Coppice Names host after checkpoint failure: {error}",
+                        elapsed()
                     );
+                    names_host_failed = true;
                 }
             }
         }
@@ -5417,6 +5570,43 @@ mod tests {
             zcash_protocol::consensus::BlockHeight::from_u32(2_500_000),
         );
         assert!(!is_commitment_tree_root_conflict(&block_conflict));
+    }
+
+    #[test]
+    fn names_fragment_upgrades_scanned_leaf_to_marked_without_changing_root() {
+        use incrementalmerkletree::Marking;
+        use shardtree::{store::memory::MemoryShardStore, ShardTree};
+
+        type TestTree =
+            ShardTree<MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>, 32, 4>;
+        let commitment = [0; 32];
+        let hash = Option::<orchard::tree::MerkleHashOrchard>::from(
+            orchard::tree::MerkleHashOrchard::from_bytes(&commitment),
+        )
+        .unwrap();
+        let checkpoint = BlockHeight::from_u32(7);
+        let mut tree = TestTree::new(MemoryShardStore::empty(), 8);
+        tree.append(
+            hash,
+            Retention::Checkpoint {
+                id: checkpoint,
+                marking: Marking::None,
+            },
+        )
+        .unwrap();
+        let root_before = tree.root_at_checkpoint_id(&checkpoint).unwrap();
+
+        let (subtree, checkpoints) = marked_names_leaf_fragment(0, commitment).unwrap();
+        tree.insert_tree(subtree, checkpoints).unwrap();
+
+        assert_eq!(
+            tree.root_at_checkpoint_id(&checkpoint).unwrap(),
+            root_before
+        );
+        assert_eq!(
+            tree.marked_positions().unwrap(),
+            [Position::from(0)].into_iter().collect()
+        );
     }
 
     #[test]

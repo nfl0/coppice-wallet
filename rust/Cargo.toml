@@ -12,10 +12,10 @@ flutter_rust_bridge = "=2.11.1"
 # Coppice is hosted by the wallet, but remains application-blind at the Core
 # boundary. Pin the reviewed revisions so this wallet remains reproducible as
 # a standalone checkout instead of depending on a particular sibling layout.
-coppice = { git = "https://github.com/nfl0/coppice.git", rev = "059a8dd28caf18bb6ff769bf43681ab7cbe493a4" }
-coppice-librustzcash = { git = "https://github.com/nfl0/coppice.git", rev = "059a8dd28caf18bb6ff769bf43681ab7cbe493a4" }
-coppice-names = { git = "https://github.com/nfl0/coppice-names.git", rev = "edee95b8cf7b78469d705f6f49688930728819b2" }
-coppice-names-wallet = { git = "https://github.com/nfl0/coppice-names.git", rev = "edee95b8cf7b78469d705f6f49688930728819b2" }
+coppice = { git = "https://github.com/nfl0/coppice.git", rev = "95d4e747dfd680f98cc08e247e69aa96cef4856f" }
+coppice-librustzcash = { git = "https://github.com/nfl0/coppice.git", rev = "95d4e747dfd680f98cc08e247e69aa96cef4856f" }
+coppice-names = { git = "https://github.com/nfl0/coppice-names.git", rev = "9586616052b57a75975fea62988425d143deab0e" }
+coppice-names-wallet = { git = "https://github.com/nfl0/coppice-names.git", rev = "9586616052b57a75975fea62988425d143deab0e" }
 
 zcash_script = "0.4.3"
 voting-crypto-deps = { version = "=0.2.2" }
@@ -139,7 +139,7 @@ version = "=1.0.0"
 # Coppice Core, and Names share one Orchard type family.
 
 [patch.crates-io]
-zakura-orchard = { git = "https://github.com/nfl0/orchard-coppice.git", rev = "0e09398970130b9510ce5011129acafc5039e79f" }
+zakura-orchard = { git = "https://github.com/nfl0/orchard-coppice.git", rev = "51c374d9d36ac1728b00d8978456d7d98a232d82" }
 
 [dependencies.zcash_proofs]
 package = "zakura-proofs"

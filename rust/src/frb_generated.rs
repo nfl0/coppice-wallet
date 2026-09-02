@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1713330816;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 116312707;
 
 // Section: executor
 
@@ -221,7 +221,7 @@ fn wire__crate__api__voting__add_sent_servers_impl(
         },
     )
 }
-fn wire__crate__api__names__begin_names_v1_registration_impl(
+fn wire__crate__api__names__begin_names_registration_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -229,7 +229,7 @@ fn wire__crate__api__names__begin_names_v1_registration_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "begin_names_v1_registration",
+            debug_name: "begin_names_registration",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -253,7 +253,7 @@ fn wire__crate__api__names__begin_names_v1_registration_impl(
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok = crate::api::names::begin_names_v1_registration(
+                    let output_ok = crate::api::names::begin_names_registration(
                         api_db_path,
                         api_network,
                         api_account_uuid,
@@ -268,7 +268,7 @@ fn wire__crate__api__names__begin_names_v1_registration_impl(
         },
     )
 }
-fn wire__crate__api__names__begin_names_v1_reveal_impl(
+fn wire__crate__api__names__begin_names_reveal_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -276,7 +276,7 @@ fn wire__crate__api__names__begin_names_v1_reveal_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "begin_names_v1_reveal",
+            debug_name: "begin_names_reveal",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -300,7 +300,7 @@ fn wire__crate__api__names__begin_names_v1_reveal_impl(
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok = crate::api::names::begin_names_v1_reveal(
+                    let output_ok = crate::api::names::begin_names_reveal(
                         api_db_path,
                         api_lightwalletd_url,
                         api_network,
@@ -346,7 +346,7 @@ fn wire__crate__api__network_privacy__begin_network_privacy_enable_impl(
         },
     )
 }
-fn wire__crate__api__names__bootstrap_names_v1_impl(
+fn wire__crate__api__names__bootstrap_names_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -354,7 +354,7 @@ fn wire__crate__api__names__bootstrap_names_v1_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "bootstrap_names_v1",
+            debug_name: "bootstrap_names",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -375,7 +375,7 @@ fn wire__crate__api__names__bootstrap_names_v1_impl(
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
-                        let output_ok = crate::api::names::bootstrap_names_v1(
+                        let output_ok = crate::api::names::bootstrap_names(
                             api_db_path,
                             api_lightwalletd_url,
                             api_network,
@@ -989,14 +989,14 @@ fn wire__crate__api__simple__configure_fast_testnet_migration_impl(
         },
     )
 }
-fn wire__crate__api__names__configure_names_v1_impl(
+fn wire__crate__api__names__configure_names_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
     data_len_: i32,
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "configure_names_v1",
+            debug_name: "configure_names",
             port: None,
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
         },
@@ -1012,39 +1012,13 @@ fn wire__crate__api__names__configure_names_v1_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_db_path = <String>::sse_decode(&mut deserializer);
             let api_network = <String>::sse_decode(&mut deserializer);
-            let api_runtime_activation_height = <u64>::sse_decode(&mut deserializer);
-            let api_names_activation_height = <u64>::sse_decode(&mut deserializer);
-            let api_epoch_size = <u64>::sse_decode(&mut deserializer);
-            let api_commit_ttl_blocks = <u64>::sse_decode(&mut deserializer);
-            let api_refresh_deadline_blocks = <u64>::sse_decode(&mut deserializer);
-            let api_lease_duration_blocks = <u64>::sse_decode(&mut deserializer);
-            let api_grace_period_blocks = <u64>::sse_decode(&mut deserializer);
-            let api_reuse_delay_blocks = <u64>::sse_decode(&mut deserializer);
-            let api_max_record_bytes = <u64>::sse_decode(&mut deserializer);
-            let api_minimum_bond_zatoshis = <u64>::sse_decode(&mut deserializer);
             let api_retention_blocks = <u64>::sse_decode(&mut deserializer);
-            let api_network_domain = <String>::sse_decode(&mut deserializer);
-            let api_rendezvous_ivk_hex = <String>::sse_decode(&mut deserializer);
-            let api_rendezvous_receiver_hex = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             transform_result_sse::<_, String>((move || {
-                let output_ok = crate::api::names::configure_names_v1(
+                let output_ok = crate::api::names::configure_names(
                     api_db_path,
                     api_network,
-                    api_runtime_activation_height,
-                    api_names_activation_height,
-                    api_epoch_size,
-                    api_commit_ttl_blocks,
-                    api_refresh_deadline_blocks,
-                    api_lease_duration_blocks,
-                    api_grace_period_blocks,
-                    api_reuse_delay_blocks,
-                    api_max_record_bytes,
-                    api_minimum_bond_zatoshis,
                     api_retention_blocks,
-                    api_network_domain,
-                    api_rendezvous_ivk_hex,
-                    api_rendezvous_receiver_hex,
                 )?;
                 Ok(output_ok)
             })())
@@ -2042,14 +2016,14 @@ fn wire__crate__api__sync__discard_keystone_migration_request_impl(
         },
     )
 }
-fn wire__crate__api__names__discard_names_v1_registration_workflow_impl(
+fn wire__crate__api__names__discard_names_registration_workflow_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
     data_len_: i32,
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "discard_names_v1_registration_workflow",
+            debug_name: "discard_names_registration_workflow",
             port: None,
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
         },
@@ -2069,7 +2043,7 @@ fn wire__crate__api__names__discard_names_v1_registration_workflow_impl(
             let api_name = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             transform_result_sse::<_, String>((move || {
-                let output_ok = crate::api::names::discard_names_v1_registration_workflow(
+                let output_ok = crate::api::names::discard_names_registration_workflow(
                     api_db_path,
                     api_network,
                     api_account_uuid,
@@ -3252,14 +3226,14 @@ fn wire__crate__api__wallet__get_lightwalletd_chain_name_impl(
         },
     )
 }
-fn wire__crate__api__names__get_managed_names_v1_impl(
+fn wire__crate__api__names__get_managed_names_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
     data_len_: i32,
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "get_managed_names_v1",
+            debug_name: "get_managed_names",
             port: None,
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
         },
@@ -3278,7 +3252,7 @@ fn wire__crate__api__names__get_managed_names_v1_impl(
             let api_account_uuid = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             transform_result_sse::<_, String>((move || {
-                let output_ok = crate::api::names::get_managed_names_v1(
+                let output_ok = crate::api::names::get_managed_names(
                     api_db_path,
                     api_network,
                     api_account_uuid,
@@ -3288,14 +3262,14 @@ fn wire__crate__api__names__get_managed_names_v1_impl(
         },
     )
 }
-fn wire__crate__api__names__get_names_v1_bond_status_impl(
+fn wire__crate__api__names__get_names_bond_status_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
     data_len_: i32,
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "get_names_v1_bond_status",
+            debug_name: "get_names_bond_status",
             port: None,
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
         },
@@ -3314,7 +3288,7 @@ fn wire__crate__api__names__get_names_v1_bond_status_impl(
             let api_account_uuid = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             transform_result_sse::<_, String>((move || {
-                let output_ok = crate::api::names::get_names_v1_bond_status(
+                let output_ok = crate::api::names::get_names_bond_status(
                     api_db_path,
                     api_network,
                     api_account_uuid,
@@ -3324,14 +3298,14 @@ fn wire__crate__api__names__get_names_v1_bond_status_impl(
         },
     )
 }
-fn wire__crate__api__names__get_names_v1_status_impl(
+fn wire__crate__api__names__get_names_status_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
     data_len_: i32,
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "get_names_v1_status",
+            debug_name: "get_names_status",
             port: None,
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
         },
@@ -3349,7 +3323,7 @@ fn wire__crate__api__names__get_names_v1_status_impl(
             let api_network = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             transform_result_sse::<_, String>((move || {
-                let output_ok = crate::api::names::get_names_v1_status(api_db_path, api_network)?;
+                let output_ok = crate::api::names::get_names_status(api_db_path, api_network)?;
                 Ok(output_ok)
             })())
         },
@@ -4673,7 +4647,7 @@ fn wire__crate__api__voting__list_pending_share_rounds_impl(
         },
     )
 }
-fn wire__crate__api__names__manage_name_v1_impl(
+fn wire__crate__api__names__manage_name_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -4681,7 +4655,7 @@ fn wire__crate__api__names__manage_name_v1_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "manage_name_v1",
+            debug_name: "manage_name",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -4706,7 +4680,7 @@ fn wire__crate__api__names__manage_name_v1_impl(
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok = crate::api::names::manage_name_v1(
+                    let output_ok = crate::api::names::manage_name(
                         api_db_path,
                         api_lightwalletd_url,
                         api_network,
@@ -5246,7 +5220,7 @@ fn wire__crate__api__voting__precompute_snapshot_bundles_impl(
         },
     )
 }
-fn wire__crate__api__names__prepare_names_v1_registration_draft_impl(
+fn wire__crate__api__names__prepare_names_registration_draft_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -5254,7 +5228,7 @@ fn wire__crate__api__names__prepare_names_v1_registration_draft_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "prepare_names_v1_registration_draft",
+            debug_name: "prepare_names_registration_draft",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -5277,7 +5251,7 @@ fn wire__crate__api__names__prepare_names_v1_registration_draft_impl(
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok = crate::api::names::prepare_names_v1_registration_draft(
+                    let output_ok = crate::api::names::prepare_names_registration_draft(
                         api_db_path,
                         api_network,
                         api_account_uuid,
@@ -6023,7 +5997,7 @@ fn wire__crate__api__voting__reset_voting_session_state_impl(
         },
     )
 }
-fn wire__crate__api__names__resolve_name_v1_impl(
+fn wire__crate__api__names__resolve_name_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -6031,7 +6005,7 @@ fn wire__crate__api__names__resolve_name_v1_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "resolve_name_v1",
+            debug_name: "resolve_name",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -6053,7 +6027,7 @@ fn wire__crate__api__names__resolve_name_v1_impl(
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
-                        let output_ok = crate::api::names::resolve_name_v1(
+                        let output_ok = crate::api::names::resolve_name(
                             api_db_path,
                             api_lightwalletd_url,
                             api_network,
@@ -6228,7 +6202,7 @@ fn wire__crate__api__sync__retire_unbroadcast_orchard_migration_impl(
         },
     )
 }
-fn wire__crate__api__names__reveal_names_v1_registration_impl(
+fn wire__crate__api__names__reveal_names_registration_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -6236,7 +6210,7 @@ fn wire__crate__api__names__reveal_names_v1_registration_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "reveal_names_v1_registration",
+            debug_name: "reveal_names_registration",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -6259,7 +6233,7 @@ fn wire__crate__api__names__reveal_names_v1_registration_impl(
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok = crate::api::names::reveal_names_v1_registration(
+                    let output_ok = crate::api::names::reveal_names_registration(
                         api_db_path,
                         api_lightwalletd_url,
                         api_network,
@@ -8510,30 +8484,26 @@ impl SseDecode for crate::api::names::ApiNamesResolution {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_status = <String>::sse_decode(deserializer);
-        let mut var_record = <Option<Vec<u8>>>::sse_decode(deserializer);
         let mut var_paymentAddress = <Option<String>>::sse_decode(deserializer);
-        let mut var_sequence = <Option<u64>>::sse_decode(deserializer);
         let mut var_leaseExpiry = <Option<u64>>::sse_decode(deserializer);
         let mut var_terminalHeight = <Option<u64>>::sse_decode(deserializer);
-        let mut var_stateCommitment = <Option<Vec<u8>>>::sse_decode(deserializer);
+        let mut var_producerTxid = <Option<Vec<u8>>>::sse_decode(deserializer);
+        let mut var_producerHeight = <Option<u64>>::sse_decode(deserializer);
+        let mut var_producerTxIndex = <Option<u64>>::sse_decode(deserializer);
+        let mut var_producerActionIndex = <Option<u64>>::sse_decode(deserializer);
         let mut var_tipHeight = <u64>::sse_decode(deserializer);
-        let mut var_candidateBlockProbes = <u64>::sse_decode(deserializer);
-        let mut var_tailBlocksScanned = <u64>::sse_decode(deserializer);
-        let mut var_lineageBlockProbes = <u64>::sse_decode(deserializer);
-        let mut var_predecessorChainSteps = <u64>::sse_decode(deserializer);
+        let mut var_compactBlocksScanned = <u64>::sse_decode(deserializer);
         return crate::api::names::ApiNamesResolution {
             status: var_status,
-            record: var_record,
             payment_address: var_paymentAddress,
-            sequence: var_sequence,
             lease_expiry: var_leaseExpiry,
             terminal_height: var_terminalHeight,
-            state_commitment: var_stateCommitment,
+            producer_txid: var_producerTxid,
+            producer_height: var_producerHeight,
+            producer_tx_index: var_producerTxIndex,
+            producer_action_index: var_producerActionIndex,
             tip_height: var_tipHeight,
-            candidate_block_probes: var_candidateBlockProbes,
-            tail_blocks_scanned: var_tailBlocksScanned,
-            lineage_block_probes: var_lineageBlockProbes,
-            predecessor_chain_steps: var_predecessorChainSteps,
+            compact_blocks_scanned: var_compactBlocksScanned,
         };
     }
 }
@@ -11620,9 +11590,9 @@ fn pde_ffi_dispatcher_primary_impl(
 2 => wire__crate__api__wallet__add_account_impl(port, ptr, rust_vec_len, data_len),
 3 => wire__crate__api__sync__add_proofs_to_pczt_impl(port, ptr, rust_vec_len, data_len),
 4 => wire__crate__api__voting__add_sent_servers_impl(port, ptr, rust_vec_len, data_len),
-5 => wire__crate__api__names__begin_names_v1_registration_impl(port, ptr, rust_vec_len, data_len),
-6 => wire__crate__api__names__begin_names_v1_reveal_impl(port, ptr, rust_vec_len, data_len),
-8 => wire__crate__api__names__bootstrap_names_v1_impl(port, ptr, rust_vec_len, data_len),
+5 => wire__crate__api__names__begin_names_registration_impl(port, ptr, rust_vec_len, data_len),
+6 => wire__crate__api__names__begin_names_reveal_impl(port, ptr, rust_vec_len, data_len),
+8 => wire__crate__api__names__bootstrap_names_impl(port, ptr, rust_vec_len, data_len),
 9 => wire__crate__api__sync__broadcast_due_orchard_migration_transactions_impl(port, ptr, rust_vec_len, data_len),
 10 => wire__crate__api__sync__broadcast_one_due_orchard_migration_transaction_impl(port, ptr, rust_vec_len, data_len),
 11 => wire__crate__api__voting__build_keystone_delegation_requests_impl(port, ptr, rust_vec_len, data_len),
@@ -11716,7 +11686,7 @@ fn pde_ffi_dispatcher_primary_impl(
 115 => wire__crate__api__sync__keystone_migration_proof_status_impl(port, ptr, rust_vec_len, data_len),
 117 => wire__crate__api__wallet__list_accounts_impl(port, ptr, rust_vec_len, data_len),
 118 => wire__crate__api__voting__list_pending_share_rounds_impl(port, ptr, rust_vec_len, data_len),
-119 => wire__crate__api__names__manage_name_v1_impl(port, ptr, rust_vec_len, data_len),
+119 => wire__crate__api__names__manage_name_impl(port, ptr, rust_vec_len, data_len),
 120 => wire__crate__api__voting__mark_delegation_submitted_impl(port, ptr, rust_vec_len, data_len),
 121 => wire__crate__api__voting__mark_share_confirmed_impl(port, ptr, rust_vec_len, data_len),
 122 => wire__crate__api__voting__mark_vote_submitted_impl(port, ptr, rust_vec_len, data_len),
@@ -11728,7 +11698,7 @@ fn pde_ffi_dispatcher_primary_impl(
 129 => wire__crate__api__voting__plan_share_submissions_impl(port, ptr, rust_vec_len, data_len),
 130 => wire__crate__api__voting__precompute_delegation_pir_impl(port, ptr, rust_vec_len, data_len),
 131 => wire__crate__api__voting__precompute_snapshot_bundles_impl(port, ptr, rust_vec_len, data_len),
-132 => wire__crate__api__names__prepare_names_v1_registration_draft_impl(port, ptr, rust_vec_len, data_len),
+132 => wire__crate__api__names__prepare_names_registration_draft_impl(port, ptr, rust_vec_len, data_len),
 133 => wire__crate__api__sync__prepare_orchard_migration_batch_pczt_impl(port, ptr, rust_vec_len, data_len),
 134 => wire__crate__api__sync__prepare_orchard_migration_denominations_pczt_impl(port, ptr, rust_vec_len, data_len),
 135 => wire__crate__api__sync__prepare_orchard_migration_immediate_pczt_impl(port, ptr, rust_vec_len, data_len),
@@ -11745,12 +11715,12 @@ fn pde_ffi_dispatcher_primary_impl(
 146 => wire__crate__api__sync__redact_pczt_for_signer_impl(port, ptr, rust_vec_len, data_len),
 148 => wire__crate__api__voting__reset_vote_tree_impl(port, ptr, rust_vec_len, data_len),
 149 => wire__crate__api__voting__reset_voting_session_state_impl(port, ptr, rust_vec_len, data_len),
-150 => wire__crate__api__names__resolve_name_v1_impl(port, ptr, rust_vec_len, data_len),
+150 => wire__crate__api__names__resolve_name_impl(port, ptr, rust_vec_len, data_len),
 151 => wire__crate__api__voting__resolve_static_voting_config_impl(port, ptr, rust_vec_len, data_len),
 152 => wire__crate__api__voting__resolve_voting_config_from_attempts_impl(port, ptr, rust_vec_len, data_len),
 153 => wire__crate__api__sync__retain_proposal_lock_until_expiry_impl(port, ptr, rust_vec_len, data_len),
 154 => wire__crate__api__sync__retire_unbroadcast_orchard_migration_impl(port, ptr, rust_vec_len, data_len),
-155 => wire__crate__api__names__reveal_names_v1_registration_impl(port, ptr, rust_vec_len, data_len),
+155 => wire__crate__api__names__reveal_names_registration_impl(port, ptr, rust_vec_len, data_len),
 156 => wire__crate__api__sync__rewind_to_height_impl(port, ptr, rust_vec_len, data_len),
 157 => wire__crate__api__sync__run_full_sync_blocking_impl(port, ptr, rust_vec_len, data_len),
 158 => wire__crate__api__sync__scan_blocks_impl(port, ptr, rust_vec_len, data_len),
@@ -11799,17 +11769,17 @@ fn pde_ffi_dispatcher_sync_impl(
             data_len,
         ),
         15 => wire__crate__api__sync__cancel_full_sync_impl(ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__names__configure_names_v1_impl(ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__names__discard_names_v1_registration_workflow_impl(
+        23 => wire__crate__api__names__configure_names_impl(ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__names__discard_names_registration_workflow_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
         66 => wire__crate__api__wallet__generate_mnemonic_impl(ptr, rust_vec_len, data_len),
         73 => wire__crate__api__sync__get_blocks_dir_impl(ptr, rust_vec_len, data_len),
-        81 => wire__crate__api__names__get_managed_names_v1_impl(ptr, rust_vec_len, data_len),
-        82 => wire__crate__api__names__get_names_v1_bond_status_impl(ptr, rust_vec_len, data_len),
-        83 => wire__crate__api__names__get_names_v1_status_impl(ptr, rust_vec_len, data_len),
+        81 => wire__crate__api__names__get_managed_names_impl(ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__names__get_names_bond_status_impl(ptr, rust_vec_len, data_len),
+        83 => wire__crate__api__names__get_names_status_impl(ptr, rust_vec_len, data_len),
         84 => wire__crate__api__network_privacy__get_network_privacy_status_impl(
             ptr,
             rust_vec_len,
@@ -12207,17 +12177,15 @@ impl flutter_rust_bridge::IntoDart for crate::api::names::ApiNamesResolution {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.status.into_into_dart().into_dart(),
-            self.record.into_into_dart().into_dart(),
             self.payment_address.into_into_dart().into_dart(),
-            self.sequence.into_into_dart().into_dart(),
             self.lease_expiry.into_into_dart().into_dart(),
             self.terminal_height.into_into_dart().into_dart(),
-            self.state_commitment.into_into_dart().into_dart(),
+            self.producer_txid.into_into_dart().into_dart(),
+            self.producer_height.into_into_dart().into_dart(),
+            self.producer_tx_index.into_into_dart().into_dart(),
+            self.producer_action_index.into_into_dart().into_dart(),
             self.tip_height.into_into_dart().into_dart(),
-            self.candidate_block_probes.into_into_dart().into_dart(),
-            self.tail_blocks_scanned.into_into_dart().into_dart(),
-            self.lineage_block_probes.into_into_dart().into_dart(),
-            self.predecessor_chain_steps.into_into_dart().into_dart(),
+            self.compact_blocks_scanned.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -15198,17 +15166,15 @@ impl SseEncode for crate::api::names::ApiNamesResolution {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.status, serializer);
-        <Option<Vec<u8>>>::sse_encode(self.record, serializer);
         <Option<String>>::sse_encode(self.payment_address, serializer);
-        <Option<u64>>::sse_encode(self.sequence, serializer);
         <Option<u64>>::sse_encode(self.lease_expiry, serializer);
         <Option<u64>>::sse_encode(self.terminal_height, serializer);
-        <Option<Vec<u8>>>::sse_encode(self.state_commitment, serializer);
+        <Option<Vec<u8>>>::sse_encode(self.producer_txid, serializer);
+        <Option<u64>>::sse_encode(self.producer_height, serializer);
+        <Option<u64>>::sse_encode(self.producer_tx_index, serializer);
+        <Option<u64>>::sse_encode(self.producer_action_index, serializer);
         <u64>::sse_encode(self.tip_height, serializer);
-        <u64>::sse_encode(self.candidate_block_probes, serializer);
-        <u64>::sse_encode(self.tail_blocks_scanned, serializer);
-        <u64>::sse_encode(self.lineage_block_probes, serializer);
-        <u64>::sse_encode(self.predecessor_chain_steps, serializer);
+        <u64>::sse_encode(self.compact_blocks_scanned, serializer);
     }
 }
 

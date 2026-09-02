@@ -1,29 +1,23 @@
 import '../../../core/config/network_config.dart';
 
-/// An explicit Coppice/Names deployment configuration, mirroring the
-/// parameters `NamesWalletConfig::from_api` validates on the Rust side.
+const kNamesEpochBlocks = 1152;
+const kNamesWindowBlocks = 24;
+const kNamesCommitMaturityBlocks = 24;
+const kNamesCommitTtlBlocks = 192;
+const kNamesLeaseBlocks = 250000;
+const kNamesCooldownBlocks = 1152;
+const kNamesBondZatoshis = 100000000;
+
+/// The chain identity and local replay policy for one Coppice/Names deployment.
 ///
-/// The wallet host deliberately embeds no deployment values ("no embedded
-/// test authority", rust/src/wallet/coppice.rs): parameters are supplied per
-/// deployment, persisted immutably into the Names sidecar on configure, and
-/// rejected when their network code does not match the wallet network. This
-/// model keeps the same contract on the Dart side — a profile exists only
-/// where a deployment was actually spelled out, and nothing below may fall
-/// back to another network's identity.
+/// Protocol rules such as the daily schedule, one-ZEC bond, lease, cooldown,
+/// and COMMIT validity are fixed by the replacement protocol and are therefore
+/// intentionally absent from this UI-facing configuration.
 class NamesDeploymentProfile {
   const NamesDeploymentProfile({
     required this.label,
     required this.isProduction,
-    required this.runtimeActivationHeight,
-    required this.namesActivationHeight,
-    required this.epochSize,
-    required this.commitTtlBlocks,
-    required this.refreshDeadlineBlocks,
-    required this.leaseDurationBlocks,
-    required this.gracePeriodBlocks,
-    required this.reuseDelayBlocks,
-    required this.maxRecordBytes,
-    required this.minimumBondZatoshis,
+    required this.activationHeight,
     required this.retentionBlocks,
     required this.networkDomain,
     required this.rendezvousIvkHex,
@@ -35,16 +29,7 @@ class NamesDeploymentProfile {
   /// False for test-chain profiles, so the UI can label them as such and
   /// keep them visually distinct from any future production deployment.
   final bool isProduction;
-  final int runtimeActivationHeight;
-  final int namesActivationHeight;
-  final int epochSize;
-  final int commitTtlBlocks;
-  final int refreshDeadlineBlocks;
-  final int leaseDurationBlocks;
-  final int gracePeriodBlocks;
-  final int reuseDelayBlocks;
-  final int maxRecordBytes;
-  final int minimumBondZatoshis;
+  final int activationHeight;
   final int retentionBlocks;
   final String networkDomain;
   final String rendezvousIvkHex;
@@ -52,8 +37,7 @@ class NamesDeploymentProfile {
 }
 
 /// The local regtest qualification deployment — the same explicit values the
-/// Rust wallet host configures against the local Zakura/Zaino regtest stack
-/// (rust/src/wallet/tests/coppice.rs, `live_zaino_bootstrap_and_missing_resolution`).
+/// Rust wallet host configures against the local Zakura/Zaino regtest stack.
 ///
 /// This is a test-chain configuration for development against the local
 /// regtest node. It must never be presented or used as a production
@@ -61,16 +45,7 @@ class NamesDeploymentProfile {
 const kLocalRegtestNamesDeploymentProfile = NamesDeploymentProfile(
   label: 'Local regtest (qualification)',
   isProduction: false,
-  runtimeActivationHeight: 2,
-  namesActivationHeight: 2,
-  epochSize: 8,
-  commitTtlBlocks: 15,
-  refreshDeadlineBlocks: 16,
-  leaseDurationBlocks: 32,
-  gracePeriodBlocks: 3,
-  reuseDelayBlocks: 4,
-  maxRecordBytes: 1024,
-  minimumBondZatoshis: 1,
+  activationHeight: 2,
   retentionBlocks: 128,
   networkDomain: 'coppice-runtime-regtest-v1',
   rendezvousIvkHex:
@@ -98,7 +73,7 @@ const Map<String, NamesDeploymentProfile?> kNamesDeploymentProfilesByNetwork = {
 /// The deployment profile for [networkName], or `null` when that network has
 /// no explicit Names deployment.
 NamesDeploymentProfile? namesDeploymentProfileForNetwork(String networkName) {
-  return kNamesDeploymentProfilesByNetwork[
-    normalizeZcashNetworkName(networkName)
-  ];
+  return kNamesDeploymentProfilesByNetwork[normalizeZcashNetworkName(
+    networkName,
+  )];
 }

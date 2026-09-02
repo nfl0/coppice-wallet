@@ -100,7 +100,7 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
     if (accountUuid == null) return null;
     try {
       final endpoint = ref.read(rpcEndpointProvider);
-      final status = rust_names.getNamesV1BondStatus(
+      final status = rust_names.getNamesBondStatus(
         dbPath: await getWalletDbPath(),
         network: endpoint.networkName,
         accountUuid: accountUuid,
@@ -172,7 +172,7 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
     try {
       late final Future<rust_names.ApiNamesRegistrationDraft> draftFuture;
       try {
-        draftFuture = rust_names.prepareNamesV1RegistrationDraft(
+        draftFuture = rust_names.prepareNamesRegistrationDraft(
           dbPath: await getWalletDbPath(),
           network: endpoint.networkName,
           accountUuid: accountUuid,
@@ -204,7 +204,7 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
     if (draftName == null || accountUuid == null) return;
     try {
       final endpoint = ref.read(rpcEndpointProvider);
-      final names = rust_names.getManagedNamesV1(
+      final names = rust_names.getManagedNames(
         dbPath: await getWalletDbPath(),
         network: endpoint.networkName,
         accountUuid: accountUuid,
@@ -274,7 +274,7 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
     try {
       late final Future<rust_names.ApiNamesCommitProposal> proposalFuture;
       try {
-        proposalFuture = rust_names.beginNamesV1Registration(
+        proposalFuture = rust_names.beginNamesRegistration(
           dbPath: await getWalletDbPath(),
           network: endpoint.networkName,
           accountUuid: accountUuid,
@@ -353,7 +353,7 @@ class ManagedNamesNotifier
     final accountUuid = ref.watch(accountProvider).value?.activeAccountUuid;
     if (accountUuid == null) return const [];
     final endpoint = ref.watch(rpcEndpointProvider);
-    return rust_names.getManagedNamesV1(
+    return rust_names.getManagedNames(
       dbPath: await getWalletDbPath(),
       network: endpoint.networkName,
       accountUuid: accountUuid,
@@ -383,7 +383,7 @@ class ManagedNamesNotifier
     try {
       late final Future<List<int>> revealFuture;
       try {
-        revealFuture = rust_names.revealNamesV1Registration(
+        revealFuture = rust_names.revealNamesRegistration(
           dbPath: await getWalletDbPath(),
           lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
           network: endpoint.networkName,
@@ -434,7 +434,7 @@ class ManagedNamesNotifier
     try {
       late final Future<rust_names.ApiNamesRevealProposal> proposalFuture;
       try {
-        proposalFuture = rust_names.beginNamesV1Reveal(
+        proposalFuture = rust_names.beginNamesReveal(
           dbPath: await getWalletDbPath(),
           lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
           network: endpoint.networkName,
@@ -470,7 +470,7 @@ class ManagedNamesNotifier
     if (accountUuid == null) return 'Unlock your wallet first.';
     try {
       final endpoint = ref.read(rpcEndpointProvider);
-      rust_names.discardNamesV1RegistrationWorkflow(
+      rust_names.discardNamesRegistrationWorkflow(
         dbPath: await getWalletDbPath(),
         network: endpoint.networkName,
         accountUuid: accountUuid,
@@ -506,7 +506,7 @@ class ManagedNamesNotifier
     try {
       late final Future<List<int>> operationFuture;
       try {
-        operationFuture = rust_names.manageNameV1(
+        operationFuture = rust_names.manageName(
           dbPath: await getWalletDbPath(),
           lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
           network: endpoint.networkName,
@@ -537,7 +537,7 @@ class NamesStatusNotifier
     if (accountUuid == null) return null;
     final endpoint = ref.watch(rpcEndpointProvider);
     final dbPath = await getWalletDbPath();
-    return rust_names.getNamesV1Status(
+    return rust_names.getNamesStatus(
       dbPath: dbPath,
       network: endpoint.networkName,
     );
@@ -565,23 +565,10 @@ class NamesStatusNotifier
     try {
       final endpoint = ref.read(rpcEndpointProvider);
       final dbPath = await getWalletDbPath();
-      final status = rust_names.configureNamesV1(
+      final status = rust_names.configureNames(
         dbPath: dbPath,
         network: endpoint.networkName,
-        runtimeActivationHeight: BigInt.from(profile.runtimeActivationHeight),
-        namesActivationHeight: BigInt.from(profile.namesActivationHeight),
-        epochSize: BigInt.from(profile.epochSize),
-        commitTtlBlocks: BigInt.from(profile.commitTtlBlocks),
-        refreshDeadlineBlocks: BigInt.from(profile.refreshDeadlineBlocks),
-        leaseDurationBlocks: BigInt.from(profile.leaseDurationBlocks),
-        gracePeriodBlocks: BigInt.from(profile.gracePeriodBlocks),
-        reuseDelayBlocks: BigInt.from(profile.reuseDelayBlocks),
-        maxRecordBytes: BigInt.from(profile.maxRecordBytes),
-        minimumBondZatoshis: BigInt.from(profile.minimumBondZatoshis),
         retentionBlocks: BigInt.from(profile.retentionBlocks),
-        networkDomain: profile.networkDomain,
-        rendezvousIvkHex: profile.rendezvousIvkHex,
-        rendezvousReceiverHex: profile.rendezvousReceiverHex,
       );
       if (!ref.mounted) return;
       action.succeed();
@@ -601,7 +588,7 @@ class NamesStatusNotifier
     try {
       final endpoint = ref.read(rpcEndpointProvider);
       final dbPath = await getWalletDbPath();
-      final status = await rust_names.bootstrapNamesV1(
+      final status = await rust_names.bootstrapNames(
         dbPath: dbPath,
         lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
         network: endpoint.networkName,

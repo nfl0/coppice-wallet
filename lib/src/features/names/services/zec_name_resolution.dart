@@ -6,9 +6,9 @@ import '../../../rust/api/names.dart' as rust_names;
 /// address. Addresses cannot contain `.`, so the distinction is unambiguous.
 const kZecNameSuffix = '.zec';
 
-/// Debounce applied before resolving a typed `.zec` name: every resolve
-/// performs a bounded chain scan on the FreshResolver path, so keystrokes
-/// must not each fire a resolver pass.
+/// Debounce applied before resolving a typed `.zec` name. The first lookup may
+/// replay from activation; later lookups advance the cached authenticated
+/// resolver, so keystrokes must not each start resolver work.
 const kZecNameResolveDebounce = Duration(milliseconds: 600);
 
 /// A successfully resolved `.zec` name, carrying the payment address the
@@ -53,7 +53,7 @@ typedef ZecNameResolver =
     });
 
 /// Injectable resolver boundary used by the Names and send UIs. Production
-/// delegates to Rust's FreshResolver; widget tests can replace it without
+/// delegates to Rust's exact authenticated resolver; widget tests can replace it without
 /// initializing the Rust bridge or a network.
 final zecNameResolverProvider = Provider<ZecNameResolver>(
   (ref) => resolveZecNameInput,
@@ -85,9 +85,9 @@ bool looksLikeZecName(String input) {
 final RegExp _zecNameLabelPattern = RegExp(r'^[a-z0-9]([a-z0-9-]*[a-z0-9])?$');
 
 /// Returns user-facing copy when [input] is not a valid bare registration
-/// label, or `null` when it is. Names v1 canonical labels are 1-63 bytes of
+/// label, or `null` when it is. Canonical labels are 1-63 bytes of
 /// `[a-z0-9-]` with no leading or trailing hyphen (see
-/// `coppice_names::v1::state::normalize_name`). The Rust host enforces the
+/// `coppice_names::protocol::Name`). The Rust host enforces the
 /// same rules authoritatively; this mirrors them so users get immediate,
 /// actionable feedback before any bond preparation starts.
 String? zecNameLabelValidationError(String input) {
@@ -107,10 +107,10 @@ String? zecNameLabelValidationError(String input) {
 }
 
 /// Normalizes `.zec` presentation (trim + lowercase) and resolves the name
-/// through the wallet's FreshResolver against the active endpoint.
+/// through the wallet's authenticated exact resolver against the active endpoint.
 ///
 /// Only an `active` lease passes — the payment flow must not send to a
-/// stale, grace, released, abandoned, expired, or missing name. Every other
+/// cooldown, claimable, or missing name. Every other
 /// outcome throws [ZecNameResolutionException] with a user-facing message.
 Future<ZecNameResolution> resolveZecNameInput(
   String input, {
@@ -124,7 +124,7 @@ Future<ZecNameResolution> resolveZecNameInput(
   }
   final rust_names.ApiNamesResolution resolution;
   try {
-    resolution = await rust_names.resolveNameV1(
+    resolution = await rust_names.resolveName(
       dbPath: dbPath,
       lightwalletdUrl: lightwalletdUrl,
       network: network,
@@ -158,29 +158,14 @@ ZecNameResolution zecNameResolutionFromApi(
         leaseExpiryHeight: resolution.leaseExpiry,
         tipHeight: resolution.tipHeight,
       );
-    case 'stale':
+    case 'cooldown':
       throw ZecNameResolutionException(
-        '`$name` is stale — its lease was not refreshed',
+        '`$name` has expired and is reserved temporarily for its previous owner',
         status: resolution.status,
       );
-    case 'grace':
+    case 'claimable':
       throw ZecNameResolutionException(
-        '`$name` is in its grace period and cannot receive payments',
-        status: resolution.status,
-      );
-    case 'released':
-      throw ZecNameResolutionException(
-        '`$name` has been released',
-        status: resolution.status,
-      );
-    case 'abandoned':
-      throw ZecNameResolutionException(
-        '`$name` was abandoned by its owner',
-        status: resolution.status,
-      );
-    case 'expired':
-      throw ZecNameResolutionException(
-        '`$name` has expired',
+        '`$name` is available to register',
         status: resolution.status,
       );
     case 'missing':

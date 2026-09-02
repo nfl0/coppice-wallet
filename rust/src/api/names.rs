@@ -1,8 +1,4 @@
-//! Flutter-facing Coppice Names v1 lifecycle and resolution API.
-//!
-//! These entrypoints deliberately keep deployment parameters explicit.  A
-//! wallet can ship one configuration profile, but the Rust host never
-//! silently substitutes a test identity or a trusted Names snapshot.
+//! Flutter-facing replacement Coppice Names lifecycle and resolution API.
 
 use crate::wallet::{coppice, keys, network::WalletNetwork};
 use flutter_rust_bridge::frb;
@@ -19,17 +15,15 @@ pub struct ApiNamesWalletStatus {
 
 pub struct ApiNamesResolution {
     pub status: String,
-    pub record: Option<Vec<u8>>,
     pub payment_address: Option<String>,
-    pub sequence: Option<u64>,
     pub lease_expiry: Option<u64>,
     pub terminal_height: Option<u64>,
-    pub state_commitment: Option<Vec<u8>>,
+    pub producer_txid: Option<Vec<u8>>,
+    pub producer_height: Option<u64>,
+    pub producer_tx_index: Option<u64>,
+    pub producer_action_index: Option<u64>,
     pub tip_height: u64,
-    pub candidate_block_probes: u64,
-    pub tail_blocks_scanned: u64,
-    pub lineage_block_probes: u64,
-    pub predecessor_chain_steps: u64,
+    pub compact_blocks_scanned: u64,
 }
 
 /// Wallet-owned denomination readiness for starting a registration.
@@ -87,42 +81,31 @@ impl From<coppice::NamesWalletStatus> for ApiNamesWalletStatus {
 
 impl From<coppice::NamesResolution> for ApiNamesResolution {
     fn from(result: coppice::NamesResolution) -> Self {
+        let producer = result.producer;
         Self {
             status: result.status,
-            record: result.record,
             payment_address: result.payment_address,
-            sequence: result.sequence,
             lease_expiry: result.lease_expiry,
             terminal_height: result.terminal_height,
-            state_commitment: result.state_commitment,
+            producer_txid: producer.as_ref().map(|producer| producer.txid.to_vec()),
+            producer_height: producer.as_ref().map(|producer| u64::from(producer.height)),
+            producer_tx_index: producer
+                .as_ref()
+                .map(|producer| u64::from(producer.tx_index)),
+            producer_action_index: producer
+                .as_ref()
+                .map(|producer| u64::from(producer.action_index)),
             tip_height: result.tip_height,
-            candidate_block_probes: result.candidate_block_probes,
-            tail_blocks_scanned: result.tail_blocks_scanned,
-            lineage_block_probes: result.lineage_block_probes,
-            predecessor_chain_steps: result.predecessor_chain_steps,
+            compact_blocks_scanned: result.compact_blocks_scanned,
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[frb(sync)]
-pub fn configure_names_v1(
+pub fn configure_names(
     db_path: String,
     network: String,
-    runtime_activation_height: u64,
-    names_activation_height: u64,
-    epoch_size: u64,
-    commit_ttl_blocks: u64,
-    refresh_deadline_blocks: u64,
-    lease_duration_blocks: u64,
-    grace_period_blocks: u64,
-    reuse_delay_blocks: u64,
-    max_record_bytes: u64,
-    minimum_bond_zatoshis: u64,
     retention_blocks: u64,
-    network_domain: String,
-    rendezvous_ivk_hex: String,
-    rendezvous_receiver_hex: String,
 ) -> Result<ApiNamesWalletStatus, String> {
     let network = keys::parse_network(&network)?;
     keys::ensure_db_migrated_once(&db_path, network)?;
@@ -132,30 +115,13 @@ pub fn configure_names_v1(
     let status = coppice::configure(
         &db_path,
         network,
-        to_u32(runtime_activation_height, "runtime activation height")?,
-        to_u32(names_activation_height, "Names activation height")?,
-        to_u32(epoch_size, "epoch size")?,
-        to_u32(commit_ttl_blocks, "commit TTL")?,
-        to_u32(refresh_deadline_blocks, "refresh deadline")?,
-        to_u32(lease_duration_blocks, "lease duration")?,
-        to_u32(grace_period_blocks, "grace period")?,
-        to_u32(reuse_delay_blocks, "reuse delay")?,
-        usize::try_from(max_record_bytes)
-            .map_err(|_| "max record bytes exceeds supported usize range".to_string())?,
-        minimum_bond_zatoshis,
         to_u32(retention_blocks, "retention blocks")?,
-        network_domain,
-        rendezvous_ivk_hex,
-        rendezvous_receiver_hex,
     )?;
     Ok(status.into())
 }
 
 #[frb(sync)]
-pub fn get_names_v1_status(
-    db_path: String,
-    network: String,
-) -> Result<ApiNamesWalletStatus, String> {
+pub fn get_names_status(db_path: String, network: String) -> Result<ApiNamesWalletStatus, String> {
     let network =
         WalletNetwork::from_str(&network).ok_or_else(|| format!("Unknown network: {network}"))?;
     Ok(coppice::status(&db_path, network)?.into())
@@ -165,7 +131,7 @@ pub fn get_names_v1_status(
 /// Ironwood note. A `needs_preparation` result tells the UI to ask the wallet
 /// send engine for an ordinary one-ZEC self-transfer before COMMIT.
 #[frb(sync)]
-pub fn get_names_v1_bond_status(
+pub fn get_names_bond_status(
     db_path: String,
     network: String,
     account_uuid: String,
@@ -182,7 +148,7 @@ pub fn get_names_v1_bond_status(
 }
 
 #[frb(sync)]
-pub fn get_managed_names_v1(
+pub fn get_managed_names(
     db_path: String,
     network: String,
     account_uuid: String,
@@ -194,15 +160,11 @@ pub fn get_managed_names_v1(
     // replay failure has removed the derived host and requested rebootstrap.
     let metadata = coppice::configured_names_metadata(&db_path, network)?;
     let current_tip = metadata.tip_height;
-    let commit_ttl_blocks = metadata.params.commit_ttl_blocks;
-    let payment_network = metadata.payment_network;
+    let commit_ttl_blocks = metadata.parameters.commit_ttl_blocks;
     coppice::managed_registrations(&db_path, network, &account_uuid)?
         .into_iter()
         .map(|registration| {
-            let payment_address =
-                coppice_names::v1::PaymentRecord::decode(&registration.record, payment_network)
-                    .ok()
-                    .map(|record| record.address().to_string());
+            let payment_address = Some(registration.ua.clone());
             let commit_expiry_height = registration
                 .commit_height
                 .map(|height| height.saturating_add(commit_ttl_blocks));
@@ -224,7 +186,7 @@ pub fn get_managed_names_v1(
 /// Persist a registration intent before the wallet prepares an exact bond.
 /// If an eligible note already exists it is immediately reserved; otherwise
 /// sync will reserve the self-transfer output as soon as it is confirmed.
-pub fn prepare_names_v1_registration_draft(
+pub fn prepare_names_registration_draft(
     db_path: String,
     network: String,
     account_uuid: String,
@@ -256,7 +218,7 @@ pub fn prepare_names_v1_registration_draft(
 /// Discards an uncompleted wallet-local workflow after the user explicitly
 /// abandons it. Canonical COMMIT/REVEAL state is never altered here.
 #[frb(sync)]
-pub fn discard_names_v1_registration_workflow(
+pub fn discard_names_registration_workflow(
     db_path: String,
     network: String,
     account_uuid: String,
@@ -274,7 +236,7 @@ pub fn discard_names_v1_registration_workflow(
 /// Reserve the exact one-ZEC registration bond and create a COMMIT carrier
 /// proposal. This intentionally does not broadcast: the established wallet
 /// review and credential flow remains the sole transaction-execution path.
-pub fn begin_names_v1_registration(
+pub fn begin_names_registration(
     db_path: String,
     network: String,
     account_uuid: String,
@@ -307,7 +269,7 @@ pub fn begin_names_v1_registration(
 /// Builds and signs a Names REVEAL after the canonical COMMIT is accepted and
 /// while its protocol-defined TTL is still live. Execution is later routed
 /// through the ordinary proposal review/confirmation entrypoint.
-pub fn begin_names_v1_reveal(
+pub fn begin_names_reveal(
     db_path: String,
     lightwalletd_url: String,
     network: String,
@@ -339,7 +301,7 @@ pub fn begin_names_v1_reveal(
 
 /// Proves and broadcasts REVEAL after the runtime has authenticated the exact
 /// accepted COMMIT and the protocol-defined COMMIT TTL is still live.
-pub fn reveal_names_v1_registration(
+pub fn reveal_names_registration(
     db_path: String,
     lightwalletd_url: String,
     network: String,
@@ -365,7 +327,7 @@ pub fn reveal_names_v1_registration(
 }
 
 /// Proves and broadcasts one canonical current-head transition.
-pub fn manage_name_v1(
+pub fn manage_name(
     db_path: String,
     lightwalletd_url: String,
     network: String,
@@ -403,7 +365,7 @@ pub fn manage_name_v1(
     Ok(txid.to_vec())
 }
 
-pub async fn bootstrap_names_v1(
+pub async fn bootstrap_names(
     db_path: String,
     lightwalletd_url: String,
     network: String,
@@ -415,7 +377,7 @@ pub async fn bootstrap_names_v1(
         .into())
 }
 
-pub async fn resolve_name_v1(
+pub async fn resolve_name(
     db_path: String,
     lightwalletd_url: String,
     network: String,
