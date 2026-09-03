@@ -3308,8 +3308,14 @@ async fn run_sync_impl(
         let first_names_height = names_blocks
             .first()
             .and_then(|block| u32::try_from(block.height).ok());
-        if names_scan_required && first_names_height.is_some() {
-            let first_height = first_names_height.expect("checked present");
+        // `from_state` is the exact frontier the ordinary wallet scan will
+        // reconcile with its persisted tree. Treat this as a speculative
+        // position boundary only: the candidate Names host is not published
+        // unless `scan_cached_blocks` authenticates and commits the batch.
+        let wallet_pre_names_tree_size =
+            u32::try_from(from_state.final_ironwood_tree().tree_size())
+                .map_err(|_| SyncError::other("wallet Ironwood frontier size exceeds u32"))?;
+        if let Some(first_height) = first_names_height.filter(|_| names_scan_required) {
             let target_height = first_height
                 .checked_sub(1)
                 .ok_or_else(|| SyncError::other("wallet scan batch has no predecessor height"))?;
@@ -3330,7 +3336,9 @@ async fn run_sync_impl(
         let prepared_names = if first_names_height.is_none() {
             None
         } else if let Some(host) = names_host.as_ref() {
-            if first_names_height.is_some_and(|height| host.can_apply_start(height)) {
+            if first_names_height.is_some_and(|height| host.can_apply_start(height))
+                && host.ironwood_tree_size() == wallet_pre_names_tree_size
+            {
                 let mut candidate = host.fork();
                 match candidate
                     .apply_compact_blocks(&mut client, names_blocks)
@@ -3354,11 +3362,11 @@ async fn run_sync_impl(
             } else {
                 if names_scan_required {
                     return Err(SyncError::other(
-                        "custody-sensitive Coppice Names host is non-contiguous before wallet scan",
+                        "custody-sensitive Coppice Names host does not match the wallet scan frontier",
                     ));
                 }
                 log::warn!(
-                    "[{}] sync: disabling non-contiguous Coppice Names host before wallet batch",
+                    "[{}] sync: disabling Coppice Names host that does not match the wallet scan frontier",
                     elapsed()
                 );
                 names_host_failed = true;
@@ -3435,6 +3443,34 @@ async fn run_sync_impl(
                                 "Ironwood commitment tree is unavailable".into(),
                             ))
                         })?;
+                }
+                // Close the speculative boundary against the wallet-owned
+                // tree inside the same SQL transaction. This makes a bad
+                // compact source, stale cache, or counting divergence abort
+                // both the wallet scan and the Names state publication.
+                if let Some((candidate, _)) = &prepared_names {
+                    let actual_tree_size = tx_db
+                        .with_ironwood_tree_mut(|tree| -> Result<u32, SqliteClientError> {
+                            u32::try_from(tree.frontier()?.tree_size()).map_err(|_| {
+                                SqliteClientError::CorruptedData(
+                                    "wallet Ironwood tree size exceeds u32".into(),
+                                )
+                            })
+                        })
+                        .map_err(AtomicScanError::Sqlite)?
+                        .ok_or_else(|| {
+                            AtomicScanError::Sqlite(SqliteClientError::CorruptedData(
+                                "Ironwood commitment tree is unavailable".into(),
+                            ))
+                        })?;
+                    if actual_tree_size != candidate.ironwood_tree_size() {
+                        return Err(AtomicScanError::Sqlite(SqliteClientError::CorruptedData(
+                            format!(
+                                "Coppice Names position replay ended at {}, wallet tree ended at {actual_tree_size}",
+                                candidate.ironwood_tree_size(),
+                            ),
+                        )));
+                    }
                 }
                 Ok(summary)
             })

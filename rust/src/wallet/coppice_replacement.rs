@@ -17,8 +17,10 @@ use std::{
 use coppice::{
     carrier::CoreRendezvous,
     identity::{CoreRuntimeParameters, ValidatedCoreRuntimeParameters, ZcashNetwork},
-    replay::{CoreReplay, CoreReplayActivationCheckpoint, CoreReplayConfiguration},
-    runtime::CoreRuntime,
+    replay::{
+        CoreReplayActivationCheckpoint, CoreReplayConfiguration, CoreReplayPositionCheckpoint,
+    },
+    runtime::CorePositionRuntime,
 };
 use coppice_librustzcash::{
     apply_compact_block_with_rendezvous_policy, authenticate_compact_transaction,
@@ -33,9 +35,8 @@ use coppice_names::{
     resolver::ExactResolver,
     schedule::Parameters as NamesParameters,
     transport::{
-        authenticated_action_position, inspect_exact_name_block,
-        inspect_validated_commit_transaction, inspect_validated_name_transaction,
-        NamesTransportStatus,
+        inspect_exact_name_positioned_block, inspect_validated_commit_transaction,
+        inspect_validated_name_transaction, positioned_action_position, NamesTransportStatus,
     },
 };
 use orchard::note_encryption::CompactAction;
@@ -51,6 +52,7 @@ use zcash_protocol::consensus::BlockHeight;
 use super::{network::WalletNetwork, sync_engine};
 
 const STORE_FORMAT_VERSION: u32 = 2;
+const RUNTIME_CHECKPOINT_FORMAT_VERSION: u32 = 3;
 const STORE_SUFFIX: &str = ".coppice-names";
 const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ACQUIRED_FULL_TRANSACTION_BYTES: usize = 64 * 1024 * 1024;
@@ -64,7 +66,9 @@ const REGTEST_RENDEZVOUS_RECEIVER_HEX: &str =
 #[derive(Serialize, Deserialize)]
 struct StoredRuntimeCheckpoint {
     format_version: u32,
-    core: Vec<u8>,
+    core_height: u32,
+    core_hash: [u8; 32],
+    ironwood_tree_size: u32,
     resolvers: Vec<StoredManagedResolver>,
 }
 
@@ -344,7 +348,7 @@ struct ManagedResolver {
 pub(crate) struct NamesWalletHost {
     network: WalletNetwork,
     config: NamesWalletConfig,
-    core: CoreRuntime,
+    core: CorePositionRuntime,
     resolvers: BTreeMap<String, ManagedResolver>,
     /// A nonsecret, derived compact-block tail used only to authenticate the
     /// bounded historical COMMIT named by a REVEAL.
@@ -394,10 +398,16 @@ impl NamesWalletHost {
             CoreReplayConfiguration::new(config.activation_height, config.retention_blocks)
                 .map_err(|error| format!("invalid Core replay configuration: {error:?}"))?;
         let activation_parent_hash = checkpoint.block_hash;
-        let replay = CoreReplay::new(replay_configuration, checkpoint)
-            .map_err(|error| format!("invalid Core activation checkpoint: {error:?}"))?;
-        let core = CoreRuntime::new(core_parameters, replay)
-            .map_err(|error| format!("cannot construct Core runtime: {error:?}"))?;
+        let core = CorePositionRuntime::new(
+            core_parameters,
+            replay_configuration,
+            CoreReplayPositionCheckpoint {
+                height: checkpoint.height,
+                block_hash: checkpoint.block_hash,
+                ironwood_tree_size: checkpoint.ironwood_tree_size,
+            },
+        )
+        .map_err(|error| format!("cannot construct Core runtime: {error:?}"))?;
         let parameters = config.parameters(network)?;
         let verifier = proof_verifier();
         let mut resolvers = BTreeMap::new();
@@ -445,11 +455,10 @@ impl NamesWalletHost {
     /// by this process and otherwise requires canonical replay.
     pub(crate) fn save_checkpoint(&self) -> Result<Vec<u8>, String> {
         let stored = StoredRuntimeCheckpoint {
-            format_version: STORE_FORMAT_VERSION,
-            core: self
-                .core
-                .save_snapshot()
-                .map_err(|error| format!("save Core runtime snapshot: {error:?}"))?,
+            format_version: RUNTIME_CHECKPOINT_FORMAT_VERSION,
+            core_height: self.core.tip().height,
+            core_hash: self.core.tip().block_hash,
+            ironwood_tree_size: self.core.ironwood_tree_size(),
             resolvers: self
                 .resolvers
                 .iter()
@@ -481,7 +490,7 @@ impl NamesWalletHost {
     ) -> Result<Self, String> {
         let stored: StoredRuntimeCheckpoint = serde_json::from_slice(bytes)
             .map_err(|error| format!("decode Names runtime checkpoint: {error}"))?;
-        if stored.format_version != STORE_FORMAT_VERSION {
+        if stored.format_version != RUNTIME_CHECKPOINT_FORMAT_VERSION {
             return Err(format!(
                 "unsupported Names runtime checkpoint format {}",
                 stored.format_version
@@ -491,12 +500,19 @@ impl NamesWalletHost {
         let replay_configuration =
             CoreReplayConfiguration::new(config.activation_height, config.retention_blocks)
                 .map_err(|error| format!("invalid Core replay configuration: {error:?}"))?;
-        let core = CoreRuntime::load_snapshot(core_parameters, replay_configuration, &stored.core)
-            .map_err(|error| format!("load Core runtime snapshot: {error:?}"))?;
+        let core = CorePositionRuntime::new(
+            core_parameters,
+            replay_configuration,
+            CoreReplayPositionCheckpoint {
+                height: stored.core_height,
+                block_hash: stored.core_hash,
+                ironwood_tree_size: stored.ironwood_tree_size,
+            },
+        )
+        .map_err(|error| format!("load Core position runtime: {error:?}"))?;
         let parameters = config.parameters(network)?;
         let verifier = proof_verifier();
-        let tree_size = u64::try_from(core.ironwood_frontier().size())
-            .map_err(|_| "checkpoint Ironwood tree size exceeds u64".to_string())?;
+        let tree_size = u64::from(core.ironwood_tree_size());
         let mut resolvers = BTreeMap::new();
         for stored_resolver in stored.resolvers {
             let name = Name::parse(&stored_resolver.name).map_err(|error| {
@@ -598,6 +614,10 @@ impl NamesWalletHost {
 
     pub(crate) fn tip_height(&self) -> u32 {
         self.core.tip().height
+    }
+
+    pub(crate) fn ironwood_tree_size(&self) -> u32 {
+        self.core.ironwood_tree_size()
     }
 
     pub(crate) fn can_apply_start(&self, height: u32) -> bool {
@@ -941,7 +961,7 @@ impl NamesWalletHost {
     /// corresponding wallet scan.
     fn apply_authenticated_block_with_referenced_commits(
         &mut self,
-        context: &coppice::replay::CoreBlockContext,
+        context: &coppice::replay::CorePositionedBlockContext,
         referenced_commits: &BTreeMap<String, Vec<ReferencedCommit>>,
     ) -> Result<ManagedBlockDelta, String> {
         let deployment = self.config.deployment(self.network)?;
@@ -952,9 +972,14 @@ impl NamesWalletHost {
 
         for (canonical_name, managed) in &mut self.resolvers {
             let name = Name::parse(canonical_name).expect("managed names are canonical");
-            let block =
-                inspect_exact_name_block(context, &core_parameters, deployment, network, &name)
-                    .map_err(|error| format!("inspect exact Names block: {error:?}"))?;
+            let block = inspect_exact_name_positioned_block(
+                context,
+                &core_parameters,
+                deployment,
+                network,
+                &name,
+            )
+            .map_err(|error| format!("inspect exact Names block: {error:?}"))?;
 
             for transaction in &block.transactions {
                 for action in &transaction.actions {
@@ -994,7 +1019,7 @@ impl NamesWalletHost {
             else {
                 continue;
             };
-            let position = authenticated_action_position(
+            let position = positioned_action_position(
                 context,
                 head.producer.tx_index,
                 head.producer.action_index,
@@ -1056,7 +1081,7 @@ impl NamesWalletHost {
                 let action_index = u32::try_from(action_index)
                     .map_err(|_| "Ironwood action index exceeds u32".to_string())?;
                 let position =
-                    authenticated_action_position(context, transaction.tx_index(), action_index)
+                    positioned_action_position(context, transaction.tx_index(), action_index)
                         .map_err(|error| format!("derive block action position: {error:?}"))?;
                 positioned_leaves.push(ManagedLeaf {
                     commitment: *commitment,
@@ -1077,7 +1102,7 @@ impl NamesWalletHost {
             })
             .next()
             .map(|(tx_index, action_index)| {
-                authenticated_action_position(context, tx_index, action_index)
+                positioned_action_position(context, tx_index, action_index)
                     .map_err(|error| format!("derive block start position: {error:?}"))
             })
             .transpose()?;
