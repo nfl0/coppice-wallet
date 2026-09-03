@@ -525,9 +525,6 @@ class _NamesViewState extends ConsumerState<NamesView> {
                   onConfigure: () => ref
                       .read(namesStatusProvider.notifier)
                       .configureWithDeploymentProfile(),
-                  onBootstrap: () => ref
-                      .read(namesStatusProvider.notifier)
-                      .bootstrapFromActiveEndpoint(),
                   onRetry: () =>
                       ref.read(namesStatusProvider.notifier).refresh(),
                 ),
@@ -554,12 +551,7 @@ class _NamesViewState extends ConsumerState<NamesView> {
                 const SizedBox(height: AppSpacing.md),
                 _ManagedNamesCard(
                   names: managedNames,
-                  bootstrapRequired:
-                      statusAsync.value?.state == 'needs_bootstrap',
                   recoveryAvailable: lookupAvailable,
-                  onBootstrap: () => ref
-                      .read(namesStatusProvider.notifier)
-                      .bootstrapFromActiveEndpoint(),
                   onRecover: _recoverName,
                   inFlightName: _managedNameInFlight,
                   error: _managedNameError,
@@ -594,7 +586,9 @@ bool _namesRegistrationAvailable(
   AsyncValue<rust_names.ApiNamesWalletStatus?> statusAsync,
   NamesDeploymentProfile? profile,
 ) {
-  return profile != null && statusAsync.value?.state == 'ready';
+  final status = statusAsync.value;
+  if (profile == null || status == null) return false;
+  return status.state == 'ready' || status.state == 'needs_bootstrap';
 }
 
 String _namesLookupUnavailableMessage(
@@ -655,7 +649,6 @@ class _DeploymentStatusCard extends StatelessWidget {
     required this.statusAsync,
     required this.action,
     required this.onConfigure,
-    required this.onBootstrap,
     required this.onRetry,
   });
 
@@ -663,7 +656,6 @@ class _DeploymentStatusCard extends StatelessWidget {
   final AsyncValue<rust_names.ApiNamesWalletStatus?> statusAsync;
   final NamesActionState action;
   final VoidCallback onConfigure;
-  final VoidCallback onBootstrap;
   final VoidCallback onRetry;
 
   @override
@@ -740,6 +732,7 @@ class _DeploymentStatusCard extends StatelessWidget {
     final colors = context.colors;
     switch (status.state) {
       case 'ready':
+      case 'needs_bootstrap':
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -751,7 +744,8 @@ class _DeploymentStatusCard extends StatelessWidget {
             ),
             const SizedBox(height: AppSpacing.xs),
             _InfoRow(label: 'Deployment', value: profile!.label),
-            _InfoRow(label: 'Chain tip', value: status.tipHeight.toString()),
+            if (status.tipHeight > BigInt.zero)
+              _InfoRow(label: 'Chain tip', value: status.tipHeight.toString()),
             _InfoRow(
               label: 'Names activation height',
               value: status.namesActivationHeight.toString(),
@@ -761,46 +755,6 @@ class _DeploymentStatusCard extends StatelessWidget {
                 label: 'Oldest rewind height',
                 value: status.oldestRewindHeight.toString(),
               ),
-          ],
-        );
-      case 'needs_bootstrap':
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _LifecycleChip(
-              key: const ValueKey('names_state_needs_bootstrap'),
-              label: 'Ready to bootstrap',
-              color: colors.text.warning,
-              icon: AppIcons.sync,
-            ),
-            const SizedBox(height: AppSpacing.xs),
-            _InfoRow(label: 'Deployment', value: profile!.label),
-            Text(
-              'Names streams the chain from the active endpoint once to '
-              'build authenticated state. Exact-name lookup works before '
-              'bootstrap completes.',
-              style: AppTypography.bodySmall.copyWith(
-                color: colors.text.secondary,
-              ),
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: AppButton(
-                key: const ValueKey('names_bootstrap_button'),
-                variant: AppButtonVariant.primary,
-                size: AppButtonSize.medium,
-                onPressed: action.inFlight == null ? onBootstrap : null,
-                trailing: action.inFlight == 'bootstrap'
-                    ? const _InlineSpinner()
-                    : null,
-                child: Text(
-                  action.inFlight == 'bootstrap'
-                      ? 'Bootstrapping…'
-                      : 'Bootstrap Names',
-                ),
-              ),
-            ),
           ],
         );
       case 'corrupt':
@@ -1128,9 +1082,7 @@ class _RegistrationCard extends StatelessWidget {
 class _ManagedNamesCard extends StatelessWidget {
   const _ManagedNamesCard({
     required this.names,
-    required this.bootstrapRequired,
     required this.recoveryAvailable,
-    required this.onBootstrap,
     required this.onRecover,
     required this.inFlightName,
     required this.error,
@@ -1142,9 +1094,7 @@ class _ManagedNamesCard extends StatelessWidget {
   });
 
   final AsyncValue<List<rust_names.ApiManagedName>> names;
-  final bool bootstrapRequired;
   final bool recoveryAvailable;
-  final VoidCallback onBootstrap;
   final VoidCallback onRecover;
   final String? inFlightName;
   final String? error;
@@ -1190,188 +1140,162 @@ class _ManagedNamesCard extends StatelessWidget {
           ],
         ),
         const SizedBox(height: AppSpacing.xs),
-        if (bootstrapRequired)
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                'Bootstrap Names to load registration workflows.',
+        names.when(
+          loading: () => const Center(child: _InlineSpinner()),
+          error: (error, stackTrace) => Text(
+            'Managed names could not be loaded.',
+            style: AppTypography.bodySmall.copyWith(
+              color: colors.text.destructive,
+            ),
+          ),
+          data: (items) {
+            if (items.isEmpty) {
+              return Text(
+                'No registration workflows for this account.',
                 style: AppTypography.bodySmall.copyWith(
                   color: colors.text.secondary,
                 ),
-              ),
-              const SizedBox(height: AppSpacing.xs),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: AppButton(
-                  key: const ValueKey('names_managed_bootstrap_button'),
-                  variant: AppButtonVariant.secondary,
-                  size: AppButtonSize.medium,
-                  onPressed: onBootstrap,
-                  child: const Text('Bootstrap Names'),
-                ),
-              ),
-            ],
-          )
-        else
-          names.when(
-            loading: () => const Center(child: _InlineSpinner()),
-            error: (error, stackTrace) => Text(
-              'Managed names could not be loaded.',
-              style: AppTypography.bodySmall.copyWith(
-                color: colors.text.destructive,
-              ),
-            ),
-            data: (items) {
-              if (items.isEmpty) {
-                return Text(
-                  'No registration workflows for this account.',
-                  style: AppTypography.bodySmall.copyWith(
-                    color: colors.text.secondary,
-                  ),
-                );
-              }
-              return Column(
-                children: items
-                    .map(
-                      (item) => Padding(
-                        key: ValueKey('managed_name_row_${item.name}'),
-                        padding: const EdgeInsets.only(bottom: AppSpacing.xs),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    '${item.name}.zec',
-                                    style: AppTypography.bodyMediumStrong
-                                        .copyWith(color: colors.text.primary),
+              );
+            }
+            return Column(
+              children: items
+                  .map(
+                    (item) => Padding(
+                      key: ValueKey('managed_name_row_${item.name}'),
+                      padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '${item.name}.zec',
+                                  style: AppTypography.bodyMediumStrong
+                                      .copyWith(color: colors.text.primary),
+                                ),
+                                Text(
+                                  _managedPhaseLabel(item.phase),
+                                  style: AppTypography.bodySmall.copyWith(
+                                    color: colors.text.secondary,
                                   ),
+                                ),
+                                if (item.phase == 'commit_accepted' &&
+                                    item.commitBlocksRemaining != null)
                                   Text(
-                                    _managedPhaseLabel(item.phase),
+                                    '${item.commitBlocksRemaining} blocks remaining before COMMIT expiry '
+                                    '(height ${item.commitExpiryHeight})',
                                     style: AppTypography.bodySmall.copyWith(
-                                      color: colors.text.secondary,
+                                      color: colors.text.warning,
                                     ),
                                   ),
-                                  if (item.phase == 'commit_accepted' &&
-                                      item.commitBlocksRemaining != null)
-                                    Text(
-                                      '${item.commitBlocksRemaining} blocks remaining before COMMIT expiry '
-                                      '(height ${item.commitExpiryHeight})',
-                                      style: AppTypography.bodySmall.copyWith(
-                                        color: colors.text.warning,
-                                      ),
+                                if (item.phase == 'commit_accepted')
+                                  Text(
+                                    item.revealWindowOpen
+                                        ? 'REVEAL window is open through height '
+                                              '${item.revealWindowEnd - BigInt.one}'
+                                        : 'REVEAL window opens at height '
+                                              '${item.revealWindowStart} '
+                                              '(${item.revealBlocksUntil} blocks)',
+                                    style: AppTypography.bodySmall.copyWith(
+                                      color: item.revealWindowOpen
+                                          ? colors.text.success
+                                          : colors.text.secondary,
                                     ),
-                                  if (item.phase == 'commit_accepted')
-                                    Text(
-                                      item.revealWindowOpen
-                                          ? 'REVEAL window is open through height '
-                                                '${item.revealWindowEnd - BigInt.one}'
-                                          : 'REVEAL window opens at height '
-                                                '${item.revealWindowStart} '
-                                                '(${item.revealBlocksUntil} blocks)',
-                                      style: AppTypography.bodySmall.copyWith(
-                                        color: item.revealWindowOpen
-                                            ? colors.text.success
-                                            : colors.text.secondary,
-                                      ),
+                                  ),
+                                if (item.phase == 'active' &&
+                                    item.refreshWindowStart != null)
+                                  Text(
+                                    item.refreshWindowOpen
+                                        ? 'REFRESH window is open through height '
+                                              '${item.refreshWindowEnd! - BigInt.one}'
+                                        : 'Next REFRESH window opens at height '
+                                              '${item.refreshWindowStart} '
+                                              '(${item.refreshBlocksUntil} blocks)',
+                                    style: AppTypography.bodySmall.copyWith(
+                                      color: item.refreshWindowOpen
+                                          ? colors.text.success
+                                          : colors.text.secondary,
                                     ),
-                                  if (item.phase == 'active' &&
-                                      item.refreshWindowStart != null)
-                                    Text(
-                                      item.refreshWindowOpen
-                                          ? 'REFRESH window is open through height '
-                                                '${item.refreshWindowEnd! - BigInt.one}'
-                                          : 'Next REFRESH window opens at height '
-                                                '${item.refreshWindowStart} '
-                                                '(${item.refreshBlocksUntil} blocks)',
-                                      style: AppTypography.bodySmall.copyWith(
-                                        color: item.refreshWindowOpen
-                                            ? colors.text.success
-                                            : colors.text.secondary,
-                                      ),
-                                    ),
-                                ],
+                                  ),
+                              ],
+                            ),
+                          ),
+                          if (item.phase == 'commit_accepted' &&
+                              item.revealWindowOpen)
+                            AppButton(
+                              key: ValueKey('names_reveal_button_${item.name}'),
+                              variant: AppButtonVariant.secondary,
+                              size: AppButtonSize.medium,
+                              onPressed: inFlightName == null
+                                  ? () => onReveal(item.name)
+                                  : null,
+                              child: inFlightName == item.name
+                                  ? const _InlineSpinner()
+                                  : const Text('Reveal now'),
+                            ),
+                          if (item.phase == 'awaiting_bond' ||
+                              item.phase == 'bond_reserved')
+                            AppButton(
+                              key: ValueKey(
+                                'names_resume_registration_${item.name}',
+                              ),
+                              variant: AppButtonVariant.secondary,
+                              size: AppButtonSize.medium,
+                              onPressed: inFlightName == null
+                                  ? () => onResumeRegistration(item)
+                                  : null,
+                              child: Text(
+                                item.phase == 'bond_reserved'
+                                    ? 'Continue'
+                                    : 'Prepare bond',
                               ),
                             ),
-                            if (item.phase == 'commit_accepted' &&
-                                item.revealWindowOpen)
-                              AppButton(
-                                key: ValueKey(
-                                  'names_reveal_button_${item.name}',
+                          if (item.phase == 'commit_proposed' ||
+                              item.phase == 'commit_broadcast' ||
+                              item.phase == 'window_missed' ||
+                              item.phase == 'commit_expired')
+                            AppButton(
+                              variant: AppButtonVariant.secondary,
+                              size: AppButtonSize.medium,
+                              onPressed: inFlightName == null
+                                  ? () => onDiscardRegistration(item)
+                                  : null,
+                              child: const Text('Start over'),
+                            ),
+                          if (item.phase == 'active')
+                            PopupMenuButton<String>(
+                              enabled: inFlightName == null,
+                              tooltip: 'Manage ${item.name}.zec',
+                              onSelected: (action) => onManage(item, action),
+                              itemBuilder: (context) => [
+                                PopupMenuItem(
+                                  value: 'update',
+                                  enabled: item.refreshWindowOpen,
+                                  child: const Text('Update address'),
                                 ),
-                                variant: AppButtonVariant.secondary,
-                                size: AppButtonSize.medium,
-                                onPressed: inFlightName == null
-                                    ? () => onReveal(item.name)
-                                    : null,
-                                child: inFlightName == item.name
-                                    ? const _InlineSpinner()
-                                    : const Text('Reveal now'),
-                              ),
-                            if (item.phase == 'awaiting_bond' ||
-                                item.phase == 'bond_reserved')
-                              AppButton(
-                                key: ValueKey(
-                                  'names_resume_registration_${item.name}',
+                                PopupMenuItem(
+                                  value: 'renew',
+                                  enabled: item.refreshWindowOpen,
+                                  child: const Text('Renew lease'),
                                 ),
-                                variant: AppButtonVariant.secondary,
-                                size: AppButtonSize.medium,
-                                onPressed: inFlightName == null
-                                    ? () => onResumeRegistration(item)
-                                    : null,
-                                child: Text(
-                                  item.phase == 'bond_reserved'
-                                      ? 'Continue'
-                                      : 'Prepare bond',
+                                const PopupMenuItem(
+                                  value: 'release',
+                                  child: Text('Release name'),
                                 ),
-                              ),
-                            if (item.phase == 'commit_proposed' ||
-                                item.phase == 'commit_broadcast' ||
-                                item.phase == 'window_missed' ||
-                                item.phase == 'commit_expired')
-                              AppButton(
-                                variant: AppButtonVariant.secondary,
-                                size: AppButtonSize.medium,
-                                onPressed: inFlightName == null
-                                    ? () => onDiscardRegistration(item)
-                                    : null,
-                                child: const Text('Start over'),
-                              ),
-                            if (item.phase == 'active')
-                              PopupMenuButton<String>(
-                                enabled: inFlightName == null,
-                                tooltip: 'Manage ${item.name}.zec',
-                                onSelected: (action) => onManage(item, action),
-                                itemBuilder: (context) => [
-                                  PopupMenuItem(
-                                    value: 'update',
-                                    enabled: item.refreshWindowOpen,
-                                    child: const Text('Update address'),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'renew',
-                                    enabled: item.refreshWindowOpen,
-                                    child: const Text('Renew lease'),
-                                  ),
-                                  const PopupMenuItem(
-                                    value: 'release',
-                                    child: Text('Release name'),
-                                  ),
-                                ],
-                                child: inFlightName == item.name
-                                    ? const _InlineSpinner()
-                                    : const AppIcon(AppIcons.options),
-                              ),
-                          ],
-                        ),
+                              ],
+                              child: inFlightName == item.name
+                                  ? const _InlineSpinner()
+                                  : const AppIcon(AppIcons.options),
+                            ),
+                        ],
                       ),
-                    )
-                    .toList(),
-              );
-            },
-          ),
+                    ),
+                  )
+                  .toList(),
+            );
+          },
+        ),
         if (error != null) ...[
           const SizedBox(height: AppSpacing.sm),
           Container(

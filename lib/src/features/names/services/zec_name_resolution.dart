@@ -189,7 +189,7 @@ String friendlyZecNameResolutionError(Object error) {
     return 'Coppice Names is not set up for this wallet yet.';
   }
   if (text.contains('bootstrap')) {
-    return 'Coppice Names is still bootstrapping. Try again shortly.';
+    return 'Coppice Names is preparing authenticated state. Try again shortly.';
   }
   if (text.contains('connect') || text.contains('endpoint')) {
     return 'Name resolution failed. Check your connection and try again.';

@@ -4,7 +4,6 @@ import '../../../../main.dart' show log;
 import '../../../core/storage/wallet_paths.dart';
 import '../../../providers/account_provider.dart';
 import '../../../providers/rpc_endpoint_provider.dart';
-import '../../../providers/sync_provider.dart';
 import '../../../rust/api/names.dart' as rust_names;
 import '../../send/services/send_flow.dart';
 import '../models/names_deployment.dart';
@@ -28,7 +27,7 @@ final namesActionProvider =
 class NamesActionState {
   const NamesActionState({this.inFlight, this.error});
 
-  /// The running action: 'configure' | 'bootstrap'.
+  /// The running action. Currently only `configure` is user initiated.
   final String? inFlight;
   final String? error;
 }
@@ -164,21 +163,38 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
       draftName: name.trim().toLowerCase(),
       draftPaymentAddress: paymentAddress.trim(),
     );
-    final mnemonicBytes = await accountNotifier.getMnemonicBytesForAccount(
-      accountUuid,
-    );
-    if (mnemonicBytes == null || mnemonicBytes.isEmpty) {
-      state = const NamesRegistrationState(
-        error: 'The selected account credential is unavailable.',
-      );
-      return null;
-    }
     final endpoint = ref.read(rpcEndpointProvider);
     try {
+      final dbPath = await getWalletDbPath();
+      final namesStatus = rust_names.getNamesStatus(
+        dbPath: dbPath,
+        network: endpoint.networkName,
+      );
+      if (namesStatus.state == 'needs_bootstrap') {
+        // The replacement protocol has no separate global-bootstrap user
+        // action. Authenticate the exact name needed by this registration;
+        // the resulting checkpoint is then reused by lifecycle construction.
+        await rust_names.resolveName(
+          dbPath: dbPath,
+          lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
+          network: endpoint.networkName,
+          name: '${name.trim().toLowerCase()}.zec',
+        );
+        ref.invalidate(namesStatusProvider);
+      }
+      final mnemonicBytes = await accountNotifier.getMnemonicBytesForAccount(
+        accountUuid,
+      );
+      if (mnemonicBytes == null || mnemonicBytes.isEmpty) {
+        state = const NamesRegistrationState(
+          error: 'The selected account credential is unavailable.',
+        );
+        return null;
+      }
       late final Future<rust_names.ApiNamesRegistrationDraft> draftFuture;
       try {
         draftFuture = rust_names.prepareNamesRegistrationDraft(
-          dbPath: await getWalletDbPath(),
+          dbPath: dbPath,
           network: endpoint.networkName,
           accountUuid: accountUuid,
           name: name,
@@ -725,45 +741,7 @@ class NamesStatusNotifier
     } catch (error) {
       log('Names: configure failed: $error');
       if (!ref.mounted) return;
-      action.fail(friendlyNamesActionError(error, 'configure'));
-    }
-  }
-
-  /// Streams the chain through the Names host so the sidecar reaches
-  /// `ready`, using the wallet's active lightwalletd endpoint.
-  Future<void> bootstrapFromActiveEndpoint() async {
-    final action = ref.read(namesActionProvider.notifier);
-    action.begin('bootstrap');
-    try {
-      final endpoint = ref.read(rpcEndpointProvider);
-      final dbPath = await getWalletDbPath();
-      final status = await rust_names.bootstrapNames(
-        dbPath: dbPath,
-        lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
-        network: endpoint.networkName,
-      );
-      if (!ref.mounted) return;
-      action.succeed();
-      state = AsyncData(status);
-      try {
-        await ref.read(managedNamesProvider.notifier).refresh();
-        if (!ref.mounted) return;
-        final registration = ref.read(namesRegistrationProvider.notifier);
-        await registration.refreshBondStatus();
-        if (!ref.mounted) return;
-        await registration.refreshDraftPhase();
-        if (!ref.mounted) return;
-        await ref.read(syncProvider.notifier).refreshAfterNamesStateChange();
-      } catch (error) {
-        // Names is already bootstrapped. A later wallet sync will retry this
-        // presentation-only refresh, so do not report bootstrap as failed or
-        // invite the user to replay it.
-        log('Names: post-bootstrap wallet refresh failed: $error');
-      }
-    } catch (error) {
-      log('Names: bootstrap failed: $error');
-      if (!ref.mounted) return;
-      action.fail(friendlyNamesActionError(error, 'bootstrap'));
+      action.fail(friendlyNamesActionError(error));
     }
   }
 }
@@ -826,7 +804,7 @@ class NameLookupNotifier extends Notifier<NameLookupState> {
   }
 }
 
-String friendlyNamesActionError(Object error, String action) {
+String friendlyNamesActionError(Object error) {
   final text = error.toString().toLowerCase();
   if (text.contains('different wallet network')) {
     return 'The stored Names configuration belongs to a different wallet '
@@ -835,7 +813,5 @@ String friendlyNamesActionError(Object error, String action) {
   if (text.contains('already') || text.contains('exists')) {
     return 'Names is already configured for this wallet.';
   }
-  return action == 'bootstrap'
-      ? "Couldn't bootstrap Coppice Names. Check your connection and try again."
-      : "Couldn't enable Coppice Names. Try again in a moment.";
+  return "Couldn't enable Coppice Names. Try again in a moment.";
 }

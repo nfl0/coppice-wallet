@@ -400,7 +400,6 @@ Future<void> _ensureNamesReady(WidgetTester tester) async {
     tester,
     () =>
         tester.any(find.byKey(const ValueKey('names_state_ready'))) ||
-        tester.any(find.byKey(const ValueKey('names_bootstrap_button'))) ||
         tester.any(find.byKey(const ValueKey('names_configure_button'))),
     description: 'Names deployment state',
     timeout: const Duration(minutes: 3),
@@ -409,21 +408,16 @@ Future<void> _ensureNamesReady(WidgetTester tester) async {
     await tapAppButton(tester, const ValueKey('names_configure_button'));
     await pumpUntil(
       tester,
-      () =>
-          tester.any(find.byKey(const ValueKey('names_state_ready'))) ||
-          tester.any(find.byKey(const ValueKey('names_bootstrap_button'))),
+      () => tester.any(find.byKey(const ValueKey('names_state_ready'))),
       description: 'configured Names deployment',
       timeout: const Duration(minutes: 2),
     );
   }
-  if (tester.any(find.byKey(const ValueKey('names_bootstrap_button')))) {
-    await tapAppButton(tester, const ValueKey('names_bootstrap_button'));
-  }
   await pumpUntil(
     tester,
     () => tester.any(find.byKey(const ValueKey('names_state_ready'))),
-    description: 'Names bootstrap',
-    timeout: const Duration(minutes: 4),
+    description: 'Names ready',
+    timeout: const Duration(minutes: 2),
   );
 }
 

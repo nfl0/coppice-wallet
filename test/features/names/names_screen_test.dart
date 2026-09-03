@@ -20,6 +20,19 @@ class _FailingNamesStatusNotifier extends NamesStatusNotifier {
   }
 }
 
+class _UninitializedNamesStatusNotifier extends NamesStatusNotifier {
+  @override
+  Future<rust_names.ApiNamesWalletStatus?> build() async =>
+      rust_names.ApiNamesWalletStatus(
+        state: 'needs_bootstrap',
+        message: 'authenticated replay is required before Names operations',
+        configured: true,
+        tipHeight: BigInt.zero,
+        namesActivationHeight: BigInt.from(1),
+        oldestRewindHeight: BigInt.zero,
+      );
+}
+
 class _ReviewManagedNamesNotifier extends ManagedNamesNotifier {
   static const name = 'reviewable';
 
@@ -257,6 +270,38 @@ void main() {
       find.byKey(const ValueKey('names_status_retry_button')),
       findsOneWidget,
     );
+  });
+
+  testWidgets('uninitialized state has no legacy bootstrap UX', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          namesDeploymentProfileProvider.overrideWithValue(
+            kLocalRegtestNamesDeploymentProfile,
+          ),
+          namesStatusProvider.overrideWith(
+            _UninitializedNamesStatusNotifier.new,
+          ),
+          managedNamesProvider.overrideWith(_RecoveryManagedNamesNotifier.new),
+        ],
+        child: const MaterialApp(
+          home: AppTheme(
+            data: AppThemeData.light,
+            child: Scaffold(body: NamesView(showDesktopChrome: false)),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('names_state_ready')), findsOneWidget);
+    expect(find.text('Bootstrap Names'), findsNothing);
+    expect(find.textContaining('bootstrap'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('names_registration_name_field')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('names_recovery_button')), findsOneWidget);
   });
 
   testWidgets('recover name is explicit and remains available with no names', (
