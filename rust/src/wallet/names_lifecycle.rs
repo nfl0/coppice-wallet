@@ -531,24 +531,49 @@ struct NamesFeeReservation {
     network: WalletNetwork,
     output: Option<OutputRef>,
     owner: LockOwner,
+    retain_on_drop: bool,
 }
 
 impl NamesFeeReservation {
-    fn disarm(&mut self) {
+    fn mark_broadcast_started(&mut self) -> Result<(), String> {
+        sync::retain_ephemeral_proposal_lock_until_expiry(&self.db_path, self.owner)?;
+        self.retain_on_drop = true;
+        Ok(())
+    }
+
+    fn release(&mut self) -> Result<(), String> {
+        let Some(output) = self.output.as_ref() else {
+            return Ok(());
+        };
+        self.retain_on_drop = false;
+        with_wallet_db_write_lock("names.release_fee_note", || {
+            let mut db = open_wallet_db(&self.db_path, self.network)?;
+            db.unlock_output(output, self.owner)
+                .map(|_| ())
+                .map_err(|error| format!("release Names fee note: {error:?}"))
+        })?;
+        sync::remove_ephemeral_proposal_lock(&self.db_path, self.owner)?;
         self.output = None;
+        Ok(())
+    }
+
+    fn retain_until_expiry(&mut self) -> Result<(), String> {
+        if !self.retain_on_drop {
+            self.mark_broadcast_started()?;
+        }
+        self.output = None;
+        Ok(())
     }
 }
 
 impl Drop for NamesFeeReservation {
     fn drop(&mut self) {
-        let Some(output) = self.output.as_ref() else {
+        if self.output.is_none() || self.retain_on_drop {
             return;
-        };
-        with_wallet_db_write_lock("names.release_failed_fee_note", || {
-            if let Ok(mut db) = open_wallet_db(&self.db_path, self.network) {
-                let _ = db.unlock_output(output, self.owner);
-            }
-        });
+        }
+        if let Err(error) = self.release() {
+            log::warn!("failed to release abandoned Names fee reservation: {error}");
+        }
     }
 }
 
@@ -687,20 +712,27 @@ pub(crate) fn build_reveal(
         PoolType::Shielded(ShieldedPool::Ironwood),
         u32::from(funding.output_index()),
     );
-    let funding_owner = LockOwner::new(registration.commitment);
-    with_wallet_db_write_lock("names.reserve_reveal_fee_note", || {
-        db.lock_outputs(
-            &[funding_ref],
-            funding_owner,
-            BlockHeight::from_u32(expiry_height),
-        )
-        .map_err(|error| format!("reserve Names REVEAL fee note: {error:?}"))
-    })?;
+    let funding_owner = LockOwner::random(&mut voting_crypto_deps::rand::rngs::OsRng);
+    let lock_expiry = BlockHeight::from_u32(expiry_height);
+    sync::persist_ephemeral_proposal_lock(db_path, funding_owner, &[funding_ref], lock_expiry)?;
+    if let Err(error) = with_wallet_db_write_lock("names.reserve_reveal_fee_note", || {
+        db.lock_outputs(&[funding_ref], funding_owner, lock_expiry)
+            .map_err(|error| format!("reserve Names REVEAL fee note: {error:?}"))
+    }) {
+        let cleanup = sync::remove_ephemeral_proposal_lock(db_path, funding_owner);
+        return Err(match cleanup {
+            Ok(()) => error,
+            Err(cleanup_error) => {
+                format!("{error}; also failed to remove recovery rows: {cleanup_error}")
+            }
+        });
+    }
     let fee_reservation = NamesFeeReservation {
         db_path: db_path.into(),
         network,
         output: Some(funding_ref),
         owner: funding_owner,
+        retain_on_drop: false,
     };
 
     let plan = prepared
@@ -829,8 +861,20 @@ fn store_reviewed_names_capability(
         let mut reservation = release_reservation
             .lock()
             .map_err(|error| format!("lock Names fee reservation: {error}"))?;
-        let _ = reservation.take();
-        Ok(())
+        match reservation.as_mut() {
+            Some(reservation) => reservation.release(),
+            None => Ok(()),
+        }
+    });
+    let broadcast_reservation = Arc::clone(&reservation);
+    let broadcast_started = Arc::new(move || {
+        let mut reservation = broadcast_reservation
+            .lock()
+            .map_err(|error| format!("lock Names fee reservation: {error}"))?;
+        match reservation.as_mut() {
+            Some(reservation) => reservation.mark_broadcast_started(),
+            None => Ok(()),
+        }
     });
     let retain_reservation = reservation;
     let retain = Arc::new(move |_lock: sync::NamesTransactionLockMetadata| {
@@ -838,7 +882,7 @@ fn store_reviewed_names_capability(
             .lock()
             .map_err(|error| format!("lock Names fee reservation: {error}"))?;
         if let Some(reservation) = reservation.as_mut() {
-            reservation.disarm();
+            reservation.retain_until_expiry()?;
         }
         Ok(())
     });
@@ -860,7 +904,11 @@ fn store_reviewed_names_capability(
         sync::NamesTransactionLockMetadata {
             expiry_height: u64::from(transaction.expiry_height),
         },
-        sync::NamesTransactionCleanup::Callbacks { release, retain },
+        sync::NamesTransactionCleanup::Callbacks {
+            release,
+            broadcast_started,
+            retain,
+        },
     )
 }
 
@@ -911,10 +959,7 @@ pub(crate) async fn reveal_registration(
         transaction.expiry_height,
     )
     .await?;
-    sync::broadcast_raw_transaction_isolated(lightwalletd_url, &transaction.raw).await?;
-    if let Some(reservation) = transaction.fee_reservation.as_mut() {
-        reservation.disarm();
-    }
+    broadcast_names_transaction(lightwalletd_url, &mut transaction).await?;
     sync::decrypt_and_store_transaction(db_path, network, &transaction.raw, None)?;
     coppice::record_reveal_broadcast(db_path, account_uuid, &transaction.name, transaction.txid)?;
     Ok(transaction.txid)
@@ -935,6 +980,41 @@ async fn ensure_live_tip(lightwalletd_url: &str, expected: u32) -> Result<(), St
         Err(format!(
             "wallet Names state is at {expected}, chain is at {actual}; sync before constructing"
         ))
+    }
+}
+
+async fn broadcast_names_transaction(
+    lightwalletd_url: &str,
+    transaction: &mut NamesTransaction,
+) -> Result<(), String> {
+    if let Some(reservation) = transaction.fee_reservation.as_mut() {
+        reservation.mark_broadcast_started()?;
+    }
+    match sync::broadcast_raw_transaction_isolated(lightwalletd_url, &transaction.raw).await {
+        Ok(()) => {
+            if let Some(reservation) = transaction.fee_reservation.as_mut() {
+                reservation.retain_until_expiry()?;
+            }
+            Ok(())
+        }
+        Err(error) if error.starts_with("Broadcast rejected:") => {
+            if let Some(reservation) = transaction.fee_reservation.as_mut() {
+                reservation.release()?;
+            }
+            Err(error)
+        }
+        Err(error) => {
+            let retain_error = transaction
+                .fee_reservation
+                .as_mut()
+                .and_then(|reservation| reservation.retain_until_expiry().err());
+            Err(match retain_error {
+                Some(retain_error) => format!(
+                    "broadcast outcome is unknown ({error}); failed to retain bounded Names fee lock: {retain_error}"
+                ),
+                None => format!("broadcast outcome is unknown: {error}"),
+            })
+        }
     }
 }
 
@@ -1275,20 +1355,27 @@ fn build_refresh(
         PoolType::Shielded(ShieldedPool::Ironwood),
         u32::from(funding.output_index()),
     );
-    let lock_owner = LockOwner::new(predecessor.commitment.to_bytes());
-    with_wallet_db_write_lock("names.reserve_refresh_fee_note", || {
-        db.lock_outputs(
-            &[funding_ref],
-            lock_owner,
-            BlockHeight::from_u32(window.end.saturating_sub(1)),
-        )
-        .map_err(|error| format!("reserve Names REFRESH fee note: {error:?}"))
-    })?;
+    let lock_owner = LockOwner::random(&mut voting_crypto_deps::rand::rngs::OsRng);
+    let lock_expiry = BlockHeight::from_u32(window.end.saturating_sub(1));
+    sync::persist_ephemeral_proposal_lock(db_path, lock_owner, &[funding_ref], lock_expiry)?;
+    if let Err(error) = with_wallet_db_write_lock("names.reserve_refresh_fee_note", || {
+        db.lock_outputs(&[funding_ref], lock_owner, lock_expiry)
+            .map_err(|error| format!("reserve Names REFRESH fee note: {error:?}"))
+    }) {
+        let cleanup = sync::remove_ephemeral_proposal_lock(db_path, lock_owner);
+        return Err(match cleanup {
+            Ok(()) => error,
+            Err(cleanup_error) => {
+                format!("{error}; also failed to remove recovery rows: {cleanup_error}")
+            }
+        });
+    }
     let fee_reservation = NamesFeeReservation {
         db_path: db_path.into(),
         network,
         output: Some(funding_ref),
         owner: lock_owner,
+        retain_on_drop: false,
     };
     let plan = prepared
         .ironwood_plan(
@@ -1581,10 +1668,7 @@ pub(crate) async fn execute_transition(
         transaction.expiry_height,
     )
     .await?;
-    sync::broadcast_raw_transaction_isolated(lightwalletd_url, &transaction.raw).await?;
-    if let Some(reservation) = transaction.fee_reservation.as_mut() {
-        reservation.disarm();
-    }
+    broadcast_names_transaction(lightwalletd_url, &mut transaction).await?;
     sync::decrypt_and_store_transaction(db_path, network, &transaction.raw, None)?;
     let action = match kind {
         NamesTransitionKind::Update(_) => "update",
@@ -1654,6 +1738,142 @@ pub(crate) async fn begin_reviewed_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_fee_reservation_persists_restart_policy() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("wallet.db");
+        let db_path = db_path.to_str().unwrap();
+        let owner = LockOwner::new([7; 32]);
+        let output = OutputRef::new(
+            TxId::from_bytes([9; 32]),
+            PoolType::Shielded(ShieldedPool::Ironwood),
+            0,
+        );
+        sync::persist_ephemeral_proposal_lock(
+            db_path,
+            owner,
+            &[output],
+            BlockHeight::from_u32(123),
+        )
+        .unwrap();
+        let mut reservation = NamesFeeReservation {
+            db_path: db_path.to_string(),
+            network: WalletNetwork::Regtest,
+            output: Some(output),
+            owner,
+            retain_on_drop: false,
+        };
+
+        reservation.mark_broadcast_started().unwrap();
+        reservation.retain_until_expiry().unwrap();
+        drop(reservation);
+
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        let retained: bool = conn
+            .query_row(
+                "SELECT retain_until_expiry FROM vizor_send_proposal_locks WHERE owner = ?1",
+                rusqlite::params![owner.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(retained);
+    }
+
+    #[test]
+    fn released_fee_reservation_removes_restart_record() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("wallet.db");
+        let db_path = db_path.to_str().unwrap();
+        let phrase = crate::wallet::keys::generate_mnemonic();
+        let seed = crate::wallet::keys::mnemonic_to_seed(&phrase).unwrap();
+        crate::wallet::keys::init_db_and_create_account(
+            db_path,
+            WalletNetwork::Regtest,
+            &seed,
+            Some(1),
+            "test",
+        )
+        .unwrap();
+        let owner = LockOwner::new([7; 32]);
+        let output = OutputRef::new(
+            TxId::from_bytes([9; 32]),
+            PoolType::Shielded(ShieldedPool::Ironwood),
+            0,
+        );
+        sync::persist_ephemeral_proposal_lock(
+            db_path,
+            owner,
+            &[output],
+            BlockHeight::from_u32(123),
+        )
+        .unwrap();
+        let mut reservation = NamesFeeReservation {
+            db_path: db_path.to_string(),
+            network: WalletNetwork::Regtest,
+            output: Some(output),
+            owner,
+            retain_on_drop: false,
+        };
+
+        reservation.release().unwrap();
+        drop(reservation);
+
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        let rows: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM vizor_send_proposal_locks WHERE owner = ?1",
+                rusqlite::params![owner.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn orphaned_unbroadcast_fee_record_is_recovered_on_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("wallet.db");
+        let db_path = db_path.to_str().unwrap();
+        let phrase = crate::wallet::keys::generate_mnemonic();
+        let seed = crate::wallet::keys::mnemonic_to_seed(&phrase).unwrap();
+        crate::wallet::keys::init_db_and_create_account(
+            db_path,
+            WalletNetwork::Regtest,
+            &seed,
+            Some(1),
+            "test",
+        )
+        .unwrap();
+        let owner = LockOwner::new([7; 32]);
+        let output = OutputRef::new(
+            TxId::from_bytes([9; 32]),
+            PoolType::Shielded(ShieldedPool::Ironwood),
+            0,
+        );
+        let expiry = BlockHeight::from_u32(123);
+        sync::persist_ephemeral_proposal_lock(db_path, owner, &[output], expiry).unwrap();
+
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute(
+            "UPDATE vizor_send_proposal_locks SET session_id = ?1 WHERE owner = ?2",
+            rusqlite::params![[0u8; 16].as_slice(), owner.as_bytes().as_slice()],
+        )
+        .unwrap();
+        drop(conn);
+
+        sync::recover_orphaned_send_locks(db_path, WalletNetwork::Regtest).unwrap();
+
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        let rows: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM vizor_send_proposal_locks WHERE owner = ?1",
+                rusqlite::params![owner.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
 
     #[test]
     fn canonical_name_accepts_one_suffix() {

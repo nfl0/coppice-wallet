@@ -135,6 +135,29 @@ pub(crate) fn open_readonly_conn_fail_fast(db_path: &str) -> Result<rusqlite::Co
     open_readonly_conn_with_timeout(db_path, None)
 }
 
+pub(crate) fn persist_ephemeral_proposal_lock(
+    db_path: &str,
+    owner: zcash_client_backend::wallet::LockOwner,
+    outputs: &[zcash_client_backend::wallet::OutputRef],
+    expiry_height: BlockHeight,
+) -> Result<(), String> {
+    proposal_locks::persist(db_path, owner, outputs, expiry_height)
+}
+
+pub(crate) fn remove_ephemeral_proposal_lock(
+    db_path: &str,
+    owner: zcash_client_backend::wallet::LockOwner,
+) -> Result<(), String> {
+    proposal_locks::remove(db_path, owner)
+}
+
+pub(crate) fn retain_ephemeral_proposal_lock_until_expiry(
+    db_path: &str,
+    owner: zcash_client_backend::wallet::LockOwner,
+) -> Result<(), String> {
+    proposal_locks::mark_retain_until_expiry(db_path, owner)
+}
+
 fn open_block_cache(cache_path: &str) -> Result<FsBlockDb, String> {
     std::fs::create_dir_all(cache_path).map_err(|e| format!("Failed to create cache dir: {e}"))?;
     let mut db_cache = FsBlockDb::for_path(cache_path)
@@ -594,6 +617,8 @@ pub(super) struct NamesTransactionLockMetadata {
 /// before invoking the callback makes release at-most-once even on failure.
 pub(super) type NamesTransactionRelease =
     Arc<dyn Fn() -> Result<(), String> + Send + Sync + 'static>;
+pub(super) type NamesTransactionBroadcastStarted =
+    Arc<dyn Fn() -> Result<(), String> + Send + Sync + 'static>;
 pub(super) type NamesTransactionRetain =
     Arc<dyn Fn(NamesTransactionLockMetadata) -> Result<(), String> + Send + Sync + 'static>;
 
@@ -602,6 +627,7 @@ pub(super) type NamesTransactionRetain =
 pub(super) enum NamesTransactionCleanup {
     Callbacks {
         release: NamesTransactionRelease,
+        broadcast_started: NamesTransactionBroadcastStarted,
         retain: NamesTransactionRetain,
     },
 }
@@ -639,6 +665,16 @@ impl NamesTransactionCapability {
     pub(super) fn release(self) -> Result<(), String> {
         let NamesTransactionCleanup::Callbacks { release, .. } = self.cleanup;
         release()
+    }
+
+    /// Make crash recovery conservative before any transaction bytes can
+    /// reach the node. A later definite rejection may still explicitly
+    /// release the lock through this capability.
+    pub(super) fn mark_broadcast_started(&self) -> Result<(), String> {
+        let NamesTransactionCleanup::Callbacks {
+            broadcast_started, ..
+        } = &self.cleanup;
+        broadcast_started()
     }
 
     /// Finish a consumed capability's retain path, preserving the bounded
@@ -826,6 +862,18 @@ pub(crate) async fn try_execute_names_transaction_proposal(
             Ok(()) => Err(error),
             Err(cleanup_error) => Err(format!(
                 "{error}; additionally failed to release the Names fee note: {cleanup_error}"
+            )),
+        };
+    }
+
+    if let Err(error) = capability.mark_broadcast_started() {
+        return match capability.release() {
+            Ok(()) => Err(format!(
+                "failed to make the Names fee lock restart-safe before broadcast: {error}"
+            )),
+            Err(cleanup_error) => Err(format!(
+                "failed to make the Names fee lock restart-safe before broadcast: {error}; \
+                 additionally failed to release the Names fee note: {cleanup_error}"
             )),
         };
     }
@@ -1216,6 +1264,7 @@ mod tests {
             NamesTransactionLockMetadata { expiry_height: 123 },
             NamesTransactionCleanup::Callbacks {
                 release: Arc::new(|| Ok(())),
+                broadcast_started: Arc::new(|| Ok(())),
                 retain: Arc::new(|_| Ok(())),
             },
         )
@@ -1261,6 +1310,53 @@ mod tests {
     }
 
     #[test]
+    fn names_broadcast_marker_precedes_and_does_not_consume_cleanup() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let broadcast_count = Arc::new(AtomicUsize::new(0));
+        let release_count = Arc::new(AtomicUsize::new(0));
+        let broadcast_count_for_callback = broadcast_count.clone();
+        let release_count_for_callback = release_count.clone();
+        let id = allocate_names_transaction_capability(
+            "names-broadcast-marker-flow",
+            NamesTransactionExecution {
+                raw: vec![0x42],
+                txid: [0; 32],
+                db_path: "test.db".to_string(),
+                network: WalletNetwork::Regtest,
+                account_uuid: "test-account".to_string(),
+                name: "test.zec".to_string(),
+                valid_from_height: 123,
+                expiry_height: 456,
+                fee_zatoshi: 1,
+                kind: NamesTransactionKind::Reveal,
+            },
+            NamesTransactionLockMetadata { expiry_height: 456 },
+            NamesTransactionCleanup::Callbacks {
+                release: Arc::new(move || {
+                    release_count_for_callback.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }),
+                broadcast_started: Arc::new(move || {
+                    broadcast_count_for_callback.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }),
+                retain: Arc::new(|_| Ok(())),
+            },
+        )
+        .unwrap();
+
+        let capability =
+            take_names_transaction_capability(id, "names-broadcast-marker-flow").unwrap();
+        capability.mark_broadcast_started().unwrap();
+        assert_eq!(broadcast_count.load(Ordering::SeqCst), 1);
+        assert_eq!(release_count.load(Ordering::SeqCst), 0);
+        capability.release().unwrap();
+        assert_eq!(release_count.load(Ordering::SeqCst), 1);
+        remove_names_test_entries(&[id]);
+    }
+
+    #[test]
     fn generic_discard_names_reveal_is_idempotent_and_releases_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1286,6 +1382,7 @@ mod tests {
                     release_count_for_callback.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 }),
+                broadcast_started: Arc::new(|| Ok(())),
                 retain: Arc::new(|_| Ok(())),
             },
         )
@@ -1322,6 +1419,7 @@ mod tests {
             NamesTransactionLockMetadata { expiry_height: 123 },
             NamesTransactionCleanup::Callbacks {
                 release: Arc::new(|| Ok(())),
+                broadcast_started: Arc::new(|| Ok(())),
                 retain: Arc::new(move |lock| {
                     retain_count_for_callback.fetch_add(1, Ordering::SeqCst);
                     retained_height_for_callback.store(lock.expiry_height, Ordering::SeqCst);
