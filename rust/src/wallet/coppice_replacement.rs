@@ -7,7 +7,7 @@
 //! wallet database transaction.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -20,15 +20,23 @@ use coppice::{
     replay::{CoreReplay, CoreReplayActivationCheckpoint, CoreReplayConfiguration},
     runtime::CoreRuntime,
 };
-use coppice_librustzcash::{apply_compact_block_with_additional_rendezvous, FullTransactionSource};
+use coppice_librustzcash::{
+    apply_compact_block_with_rendezvous_policy, authenticate_compact_transaction,
+    FullTransactionSource,
+};
 use coppice_names::{
+    codec::Operation,
     deployment::DeploymentParameters,
     proof::{keygen, OrchardProofVerifier},
     protocol::{CanonicalUa, FieldElement, Name, NameRoute, Network},
-    reducer::{Head, Lifecycle},
+    reducer::{Head, Lifecycle, ReferencedCommit},
     resolver::ExactResolver,
     schedule::Parameters as NamesParameters,
-    transport::{authenticated_action_position, inspect_exact_name_block},
+    transport::{
+        authenticated_action_position, inspect_exact_name_block,
+        inspect_validated_commit_transaction, inspect_validated_name_transaction,
+        NamesTransportStatus,
+    },
 };
 use orchard::note_encryption::CompactAction;
 use rand_10::Rng;
@@ -38,7 +46,7 @@ use zcash_client_backend::proto::{
     compact_formats::{CompactBlock, CompactTx},
     service::{compact_tx_streamer_client::CompactTxStreamerClient, RawTransaction},
 };
-use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::consensus::BlockHeight;
 
 use super::{network::WalletNetwork, sync_engine};
 
@@ -338,6 +346,12 @@ pub(crate) struct NamesWalletHost {
     config: NamesWalletConfig,
     core: CoreRuntime,
     resolvers: BTreeMap<String, ManagedResolver>,
+    /// A nonsecret, derived compact-block tail used only to authenticate the
+    /// bounded historical COMMIT named by a REVEAL.
+    recent_compact_blocks: VecDeque<CompactBlock>,
+    /// COMMIT txids created by this wallet. Generic acquisition is enabled
+    /// only for the finite blocks that contain one of these transactions.
+    watched_commit_txids: BTreeSet<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -417,6 +431,8 @@ impl NamesWalletHost {
             config,
             core,
             resolvers,
+            recent_compact_blocks: VecDeque::new(),
+            watched_commit_txids: BTreeSet::new(),
         })
     }
 
@@ -567,7 +583,17 @@ impl NamesWalletHost {
             config,
             core,
             resolvers,
+            recent_compact_blocks: VecDeque::new(),
+            watched_commit_txids: BTreeSet::new(),
         })
+    }
+
+    fn watch_registrations(&mut self, registrations: &[StoredRegistration]) {
+        self.watched_commit_txids = registrations
+            .iter()
+            .filter(|registration| registration.reveal_txid.is_none())
+            .filter_map(|registration| registration.commit_txid)
+            .collect();
     }
 
     pub(crate) fn tip_height(&self) -> u32 {
@@ -581,6 +607,17 @@ impl NamesWalletHost {
     }
 
     pub(crate) fn routes_for_height(&self, height: u32) -> Result<Vec<CoreRendezvous>, String> {
+        Ok(self
+            .named_routes_for_height(height)?
+            .into_iter()
+            .map(|(_, route)| route)
+            .collect())
+    }
+
+    fn named_routes_for_height(
+        &self,
+        height: u32,
+    ) -> Result<Vec<(String, CoreRendezvous)>, String> {
         let parameters = self.config.parameters(self.network)?;
         let mut routes = Vec::new();
         for name in self.resolvers.keys() {
@@ -591,12 +628,98 @@ impl NamesWalletHost {
             }
             let route = NameRoute::derive(parameters.deployment_id, name_id)
                 .map_err(|error| format!("derive name route: {error:?}"))?;
-            routes.push(
+            routes.push((
+                name.as_str().to_owned(),
                 CoreRendezvous::try_new(&route.incoming_viewing_key(), &route.receiver())
                     .map_err(|error| format!("construct name rendezvous: {error:?}"))?,
-            );
+            ));
         }
         Ok(routes)
+    }
+
+    fn remember_compact_block(&mut self, block: &CompactBlock) -> Result<(), String> {
+        let height = u32::try_from(block.height)
+            .map_err(|_| "compact block height exceeds u32".to_string())?;
+        if self.recent_compact_blocks.back().is_some_and(|prior| {
+            u32::try_from(prior.height)
+                .ok()
+                .is_some_and(|prior_height| prior_height >= height)
+        }) {
+            return Err("recent compact blocks are not strictly ordered".into());
+        }
+        self.recent_compact_blocks.push_back(block.clone());
+        let ttl = self.config.deployment(self.network)?.commit_ttl_blocks;
+        while self.recent_compact_blocks.front().is_some_and(|oldest| {
+            u32::try_from(oldest.height)
+                .ok()
+                .is_some_and(|oldest_height| height.saturating_sub(oldest_height) >= ttl)
+        }) {
+            self.recent_compact_blocks.pop_front();
+        }
+        Ok(())
+    }
+
+    fn prime_recent_compact_blocks(&mut self, blocks: Vec<CompactBlock>) -> Result<(), String> {
+        if !self.recent_compact_blocks.is_empty() || blocks.is_empty() {
+            return Ok(());
+        }
+        let mut previous_height: Option<u32> = None;
+        let mut previous_hash: Option<[u8; 32]> = None;
+        for block in &blocks {
+            let height = u32::try_from(block.height)
+                .map_err(|_| "historical compact block height exceeds u32".to_string())?;
+            let hash = exact_32(&block.hash)
+                .ok_or_else(|| "historical compact block has an invalid hash".to_string())?;
+            let prev_hash = exact_32(&block.prev_hash).ok_or_else(|| {
+                "historical compact block has an invalid previous hash".to_string()
+            })?;
+            if previous_height.is_some_and(|prior| prior.checked_add(1) != Some(height))
+                || previous_hash.is_some_and(|prior| prior != prev_hash)
+            {
+                return Err("historical compact-block tail is not contiguous".into());
+            }
+            previous_height = Some(height);
+            previous_hash = Some(hash);
+        }
+        if previous_height != Some(self.tip_height())
+            || previous_hash != Some(self.core.tip().block_hash)
+        {
+            return Err("historical compact-block tail is not bound to the Names tip".into());
+        }
+        for block in &blocks {
+            self.remember_compact_block(block)?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_recent_compact_tail(
+        &mut self,
+        client: &mut CompactTxStreamerClient<tonic::transport::Channel>,
+    ) -> Result<(), String> {
+        if !self.recent_compact_blocks.is_empty()
+            || self.tip_height() < self.config.activation_height
+        {
+            return Ok(());
+        }
+        let ttl = self.config.deployment(self.network)?.commit_ttl_blocks;
+        let tail_start = self
+            .tip_height()
+            .saturating_sub(ttl.saturating_sub(2))
+            .max(self.config.activation_height);
+        let tail = sync_engine::download_blocks_vec(
+            client,
+            BlockHeight::from_u32(tail_start),
+            BlockHeight::from_u32(self.tip_height()),
+            self.network,
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "download referenced-COMMIT tail {tail_start}..={}: {error}",
+                self.tip_height()
+            )
+        })?;
+        self.prime_recent_compact_blocks(tail)
     }
 
     pub(crate) fn managed_resolutions(&self) -> Vec<ManagedResolution> {
@@ -632,33 +755,6 @@ impl NamesWalletHost {
         }
     }
 
-    /// Applies one compact block to this host fork, including exact dynamic
-    /// route acquisition, and returns the corresponding wallet-tree delta.
-    pub(crate) fn apply_compact_block<P, S>(
-        &mut self,
-        consensus: &P,
-        compact: &CompactBlock,
-        source: &mut S,
-    ) -> Result<ManagedBlockDelta, String>
-    where
-        P: Parameters,
-        S: FullTransactionSource,
-        S::Error: std::fmt::Debug,
-    {
-        let height = u32::try_from(compact.height)
-            .map_err(|_| "compact block height exceeds u32".to_string())?;
-        let routes = self.routes_for_height(height)?;
-        let context = apply_compact_block_with_additional_rendezvous(
-            consensus,
-            &mut self.core,
-            compact,
-            source,
-            &routes,
-        )
-        .map_err(|error| format!("apply canonical Names block: {error:?}"))?;
-        self.apply_authenticated_block(context.core())
-    }
-
     pub(crate) async fn apply_compact_blocks(
         &mut self,
         client: &mut CompactTxStreamerClient<tonic::transport::Channel>,
@@ -675,50 +771,166 @@ impl NamesWalletHost {
                 self.tip_height()
             ));
         }
+        self.ensure_recent_compact_tail(client).await?;
 
         let mut txids = BTreeSet::new();
+        let mut exact_candidates = Vec::new();
+        let mut observe_generic_at = BTreeSet::new();
         for block in &blocks {
             let height = u32::try_from(block.height)
                 .map_err(|_| "Names batch height exceeds u32".to_string())?;
-            let routes = self.routes_for_height(height)?;
+            let routes = self.named_routes_for_height(height)?;
+            let mut scanned = Vec::with_capacity(block.vtx.len());
             for transaction in &block.vtx {
-                if compact_tx_matches_any_route(transaction, self.core.rendezvous(), &routes)? {
-                    txids.insert(
-                        exact_32(&transaction.txid).ok_or_else(|| {
-                            "compact transaction has a non-32-byte txid".to_string()
-                        })?,
-                    );
+                let txid = exact_32(&transaction.txid)
+                    .ok_or_else(|| "compact transaction has a non-32-byte txid".to_string())?;
+                let (generic, names) =
+                    compact_tx_route_hits(transaction, self.core.rendezvous(), &routes)?;
+                if generic && self.watched_commit_txids.contains(&txid) {
+                    observe_generic_at.insert(height);
+                }
+                scanned.push((transaction, txid, generic, names));
+            }
+            let observe_generic = observe_generic_at.contains(&height);
+            for (transaction, txid, generic, names) in scanned {
+                if !names.is_empty() {
+                    txids.insert(txid);
+                    exact_candidates.push((height, transaction.clone(), names));
+                }
+                // Core's generic route is enabled only in a block containing a
+                // wallet-authored pending COMMIT. Fetch every generic candidate
+                // in that finite block so Core's acquisition contract remains
+                // complete even if another transaction shares the route.
+                if observe_generic && generic {
+                    txids.insert(txid);
                 }
             }
         }
         let mut full_transactions = BTreeMap::new();
         let mut acquired_bytes = 0usize;
         for txid in txids {
-            let raw: RawTransaction = super::sync_engine::get_transaction(client, txid.to_vec())
-                .await
-                .map_err(|error| format!("get_transaction {}: {error}", hex::encode(txid)))?;
-            if raw.data.len() > coppice_librustzcash::MAX_FULL_TRANSACTION_BYTES {
-                return Err(format!(
-                    "full transaction {} exceeds acquisition limit",
-                    hex::encode(txid)
-                ));
+            fetch_full_transaction(client, txid, &mut full_transactions, &mut acquired_bytes)
+                .await?;
+        }
+
+        let deployment = self.config.deployment(self.network)?;
+        let names_network = self.config.network();
+        let core_parameters = self.config.validated_core_parameters(self.network)?;
+        let timing = self.config.parameters(self.network)?;
+        let compact_history = compact_transaction_history(&self.recent_compact_blocks, &blocks);
+        let mut requested_commits = Vec::new();
+        for (reveal_height, compact, names) in exact_candidates {
+            let txid = exact_32(&compact.txid)
+                .ok_or_else(|| "compact transaction has a non-32-byte txid".to_string())?;
+            let bytes = full_transactions
+                .get(&txid)
+                .ok_or_else(|| "exact-route transaction was not acquired".to_string())?;
+            let authenticated =
+                authenticate_compact_transaction(&self.network, reveal_height, &compact, bytes)
+                    .map_err(|error| format!("authenticate exact Names transaction: {error:?}"))?;
+            for canonical_name in names {
+                let name = Name::parse(&canonical_name)
+                    .map_err(|error| format!("invalid managed Names label: {error:?}"))?;
+                let status = inspect_validated_name_transaction(
+                    &authenticated,
+                    &core_parameters,
+                    deployment,
+                    names_network,
+                    &name,
+                )
+                .map_err(|error| format!("inspect exact Names transaction: {error:?}"))?;
+                let NamesTransportStatus::Operation(Operation::Reveal { commit, .. }) = status
+                else {
+                    continue;
+                };
+                let Some(age) = reveal_height.checked_sub(commit.height) else {
+                    continue;
+                };
+                if commit.height < timing.activation_height
+                    || age < timing.commit_maturity_blocks
+                    || age >= timing.commit_ttl_blocks
+                {
+                    continue;
+                }
+                let Some(referenced) = compact_history
+                    .get(&(commit.height, commit.tx_index, commit.txid))
+                    .cloned()
+                else {
+                    continue;
+                };
+                if !compact_tx_matches_route(&referenced, self.core.rendezvous())? {
+                    continue;
+                }
+                requested_commits.push((reveal_height, canonical_name, commit, referenced));
             }
-            acquired_bytes = acquired_bytes
-                .checked_add(raw.data.len())
-                .ok_or_else(|| "full transaction acquisition size overflowed".to_string())?;
-            if acquired_bytes > MAX_ACQUIRED_FULL_TRANSACTION_BYTES {
-                return Err(format!(
-                    "full transaction acquisition exceeds {MAX_ACQUIRED_FULL_TRANSACTION_BYTES} bytes"
-                ));
+        }
+
+        for (_, _, reference, _) in &requested_commits {
+            if !full_transactions.contains_key(&reference.txid) {
+                fetch_full_transaction(
+                    client,
+                    reference.txid,
+                    &mut full_transactions,
+                    &mut acquired_bytes,
+                )
+                .await?;
             }
-            full_transactions.insert(txid, raw.data);
+        }
+
+        let mut referenced_by_block =
+            BTreeMap::<u32, BTreeMap<String, Vec<ReferencedCommit>>>::new();
+        for (reveal_height, canonical_name, reference, compact) in requested_commits {
+            let bytes = full_transactions
+                .get(&reference.txid)
+                .ok_or_else(|| "referenced COMMIT transaction was not acquired".to_string())?;
+            let authenticated =
+                authenticate_compact_transaction(&self.network, reference.height, &compact, bytes)
+                    .map_err(|error| format!("authenticate referenced COMMIT: {error:?}"))?;
+            let status = inspect_validated_commit_transaction(
+                &authenticated,
+                &core_parameters,
+                deployment,
+                names_network,
+            )
+            .map_err(|error| format!("inspect referenced COMMIT: {error:?}"))?;
+            let NamesTransportStatus::Operation(Operation::Commit { commitment }) = status else {
+                continue;
+            };
+            referenced_by_block
+                .entry(reveal_height)
+                .or_default()
+                .entry(canonical_name)
+                .or_default()
+                .push(ReferencedCommit {
+                    reference,
+                    commitment,
+                });
         }
         let mut source = MapFullTransactionSource(full_transactions);
         let mut candidate = self.fork();
         let mut deltas = Vec::with_capacity(blocks.len());
         for block in &blocks {
+            let height = u32::try_from(block.height)
+                .map_err(|_| "Names batch height exceeds u32".to_string())?;
             let network = candidate.network;
-            deltas.push(candidate.apply_compact_block(&network, block, &mut source)?);
+            let routes = candidate.routes_for_height(height)?;
+            let context = apply_compact_block_with_rendezvous_policy(
+                &network,
+                &mut candidate.core,
+                block,
+                &mut source,
+                observe_generic_at.contains(&height),
+                &routes,
+            )
+            .map_err(|error| format!("apply canonical Names block: {error:?}"))?;
+            let referenced = referenced_by_block.remove(&height).unwrap_or_default();
+            deltas.push(
+                candidate.apply_authenticated_block_with_referenced_commits(
+                    context.core(),
+                    &referenced,
+                )?,
+            );
+            candidate.remember_compact_block(block)?;
         }
         *self = candidate;
         Ok(deltas)
@@ -727,9 +939,10 @@ impl NamesWalletHost {
     /// Applies one already Core-authenticated block to every managed exact
     /// resolver and returns the wallet-tree changes that must commit with the
     /// corresponding wallet scan.
-    pub(crate) fn apply_authenticated_block(
+    fn apply_authenticated_block_with_referenced_commits(
         &mut self,
         context: &coppice::replay::CoreBlockContext,
+        referenced_commits: &BTreeMap<String, Vec<ReferencedCommit>>,
     ) -> Result<ManagedBlockDelta, String> {
         let deployment = self.config.deployment(self.network)?;
         let network = self.config.network();
@@ -751,7 +964,13 @@ impl NamesWalletHost {
 
             managed
                 .resolver
-                .apply_block(&block)
+                .apply_block_with_referenced_commits(
+                    &block,
+                    referenced_commits
+                        .get(canonical_name)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                )
                 .map_err(|error| format!("apply exact Names block: {error:?}"))?;
             for transaction in &block.transactions {
                 let Some(coppice_names::codec::Operation::Commit { commitment }) =
@@ -887,10 +1106,10 @@ fn host_from_stored(
             tag == checkpoint_cache_tag(&stored.config, &stored.tracked_names, checkpoint)
         })
     });
-    let host = checkpoint
+    let mut host = checkpoint
         .map(|bytes| NamesWalletHost::load_checkpoint(network, stored.config.clone(), bytes))
         .transpose()?;
-    if let Some(host) = &host {
+    if let Some(host) = &mut host {
         let missing = stored
             .tracked_names
             .iter()
@@ -898,6 +1117,7 @@ fn host_from_stored(
         if missing {
             return Err("Names checkpoint omits a tracked exact resolver".into());
         }
+        host.watch_registrations(&stored.registrations);
     }
     Ok(host)
 }
@@ -1524,6 +1744,7 @@ pub(crate) async fn ensure_for_managed_scan(
         candidate = None;
     }
     if let Some(mut existing) = candidate {
+        existing.watch_registrations(&stored.registrations);
         let forward = if existing.tip_height() < target_height {
             let start_height = existing.tip_height().saturating_add(1);
             replay_range(&mut existing, client, start_height, target_height).await
@@ -1566,6 +1787,7 @@ pub(crate) async fn ensure_for_managed_scan(
         )
         .collect::<BTreeSet<_>>();
     let mut rebuilt = NamesWalletHost::from_checkpoint(network, stored.config, checkpoint, names)?;
+    rebuilt.watch_registrations(&stored.registrations);
     replay_range(
         &mut rebuilt,
         client,
@@ -1616,6 +1838,7 @@ pub(crate) async fn bootstrap(
         )
         .collect::<BTreeSet<_>>();
     let mut host = NamesWalletHost::from_checkpoint(network, stored.config, checkpoint, names)?;
+    host.watch_registrations(&stored.registrations);
     replay_range(
         &mut host,
         &mut client,
@@ -1694,7 +1917,10 @@ pub(crate) async fn resolve_name(
             .chain(stored.tracked_names.iter().cloned())
             .chain(std::iter::once(name.as_str().to_owned()))
             .collect::<BTreeSet<_>>();
-        NamesWalletHost::from_checkpoint(network, stored.config.clone(), checkpoint, names)?
+        let mut host =
+            NamesWalletHost::from_checkpoint(network, stored.config.clone(), checkpoint, names)?;
+        host.watch_registrations(&stored.registrations);
+        host
     };
     if host.tip_height() < tip_height {
         let start = host.tip_height().saturating_add(1);
@@ -1882,23 +2108,91 @@ fn checkpoint_cache_tag(
     state.finalize().as_bytes().try_into().expect("32-byte tag")
 }
 
-fn compact_tx_matches_any_route(
+fn compact_tx_route_hits(
     transaction: &CompactTx,
     core: &CoreRendezvous,
-    names: &[CoreRendezvous],
+    names: &[(String, CoreRendezvous)],
+) -> Result<(bool, Vec<String>), String> {
+    let mut generic = false;
+    let mut matched_names = BTreeSet::new();
+    for (index, encoded) in transaction.ironwood_actions.iter().enumerate() {
+        let action = CompactAction::try_from(encoded)
+            .map_err(|_| format!("invalid compact Ironwood action {index}"))?;
+        generic |= core.compact_action_is_rendezvous(&action);
+        for (name, route) in names {
+            if route.compact_action_is_rendezvous(&action) {
+                matched_names.insert(name.clone());
+            }
+        }
+    }
+    Ok((generic, matched_names.into_iter().collect()))
+}
+
+fn compact_tx_matches_route(
+    transaction: &CompactTx,
+    route: &CoreRendezvous,
 ) -> Result<bool, String> {
     for (index, encoded) in transaction.ironwood_actions.iter().enumerate() {
         let action = CompactAction::try_from(encoded)
             .map_err(|_| format!("invalid compact Ironwood action {index}"))?;
-        if core.compact_action_is_rendezvous(&action)
-            || names
-                .iter()
-                .any(|route| route.compact_action_is_rendezvous(&action))
-        {
+        if route.compact_action_is_rendezvous(&action) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn compact_transaction_history(
+    prior: &VecDeque<CompactBlock>,
+    current: &[CompactBlock],
+) -> BTreeMap<(u32, u32, [u8; 32]), CompactTx> {
+    prior
+        .iter()
+        .chain(current)
+        .flat_map(|block| {
+            let height = u32::try_from(block.height).ok();
+            block.vtx.iter().filter_map(move |transaction| {
+                Some((
+                    (
+                        height?,
+                        u32::try_from(transaction.index).ok()?,
+                        exact_32(&transaction.txid)?,
+                    ),
+                    transaction.clone(),
+                ))
+            })
+        })
+        .collect()
+}
+
+async fn fetch_full_transaction(
+    client: &mut CompactTxStreamerClient<tonic::transport::Channel>,
+    txid: [u8; 32],
+    full_transactions: &mut BTreeMap<[u8; 32], Vec<u8>>,
+    acquired_bytes: &mut usize,
+) -> Result<(), String> {
+    if full_transactions.contains_key(&txid) {
+        return Ok(());
+    }
+    let raw: RawTransaction = super::sync_engine::get_transaction(client, txid.to_vec())
+        .await
+        .map_err(|error| format!("get_transaction {}: {error}", hex::encode(txid)))?;
+    if raw.data.len() > coppice_librustzcash::MAX_FULL_TRANSACTION_BYTES {
+        return Err(format!(
+            "full transaction {} exceeds acquisition limit",
+            hex::encode(txid)
+        ));
+    }
+    *acquired_bytes = acquired_bytes
+        .checked_add(raw.data.len())
+        .ok_or_else(|| "full transaction acquisition size overflowed".to_string())?;
+    if *acquired_bytes > MAX_ACQUIRED_FULL_TRANSACTION_BYTES {
+        return Err(format!(
+            "full transaction acquisition exceeds {MAX_ACQUIRED_FULL_TRANSACTION_BYTES} bytes"
+        ));
+    }
+    full_transactions.insert(txid, raw.data);
+    Ok(())
 }
 
 struct MapFullTransactionSource(BTreeMap<[u8; 32], Vec<u8>>);
@@ -1989,6 +2283,34 @@ mod tests {
         deployed_config(WalletNetwork::Regtest, 64).unwrap()
     }
 
+    fn compact_block(height: u32, prev_hash: [u8; 32], hash: [u8; 32]) -> CompactBlock {
+        CompactBlock {
+            height: u64::from(height),
+            hash: hash.to_vec(),
+            prev_hash: prev_hash.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn stored_registration(commit_txid: Option<[u8; 32]>) -> StoredRegistration {
+        StoredRegistration {
+            account_uuid: "account".into(),
+            name: "alice".into(),
+            ua: "uregtest1storage-only".into(),
+            commitment: [2; 32],
+            target_epoch: 1,
+            target_reveal_height: 20,
+            send_flow_id: None,
+            bond_txid: None,
+            bond_output_index: None,
+            commit_height: None,
+            commit_tx_index: None,
+            phase: "commit_broadcast".into(),
+            commit_txid,
+            reveal_txid: None,
+        }
+    }
+
     #[test]
     fn compiled_regtest_deployment_uses_accelerated_timing() {
         let parameters = config().parameters(WalletNetwork::Regtest).unwrap();
@@ -2031,6 +2353,68 @@ mod tests {
         fork.resolvers.remove("alice");
         assert_eq!(fork.managed_resolutions().len(), 1);
         assert_eq!(restored.managed_resolutions().len(), 2);
+    }
+
+    #[test]
+    fn referenced_commit_tail_must_chain_to_authenticated_tip() {
+        let checkpoint = CoreReplayActivationCheckpoint {
+            height: 1,
+            block_hash: [7; 32],
+            ironwood_frontier: IronwoodFrontier::empty(),
+            ironwood_tree_size: 0,
+        };
+        let mut host = NamesWalletHost::from_checkpoint(
+            WalletNetwork::Regtest,
+            config(),
+            checkpoint.clone(),
+            ["alice".to_string()],
+        )
+        .unwrap();
+        host.prime_recent_compact_blocks(vec![
+            compact_block(0, [5; 32], [6; 32]),
+            compact_block(1, [6; 32], [7; 32]),
+        ])
+        .unwrap();
+        assert_eq!(host.recent_compact_blocks.len(), 2);
+
+        let mut disjoint = NamesWalletHost::from_checkpoint(
+            WalletNetwork::Regtest,
+            config(),
+            checkpoint,
+            ["alice".to_string()],
+        )
+        .unwrap();
+        assert!(disjoint
+            .prime_recent_compact_blocks(vec![
+                compact_block(0, [5; 32], [6; 32]),
+                compact_block(1, [9; 32], [7; 32]),
+            ])
+            .is_err());
+        assert!(disjoint.recent_compact_blocks.is_empty());
+    }
+
+    #[test]
+    fn only_pending_wallet_commit_txids_enable_generic_observation() {
+        let mut host = NamesWalletHost::from_checkpoint(
+            WalletNetwork::Regtest,
+            config(),
+            CoreReplayActivationCheckpoint {
+                height: 1,
+                block_hash: [7; 32],
+                ironwood_frontier: IronwoodFrontier::empty(),
+                ironwood_tree_size: 0,
+            },
+            ["alice".to_string()],
+        )
+        .unwrap();
+        let mut revealed = stored_registration(Some([8; 32]));
+        revealed.reveal_txid = Some([9; 32]);
+        host.watch_registrations(&[
+            stored_registration(Some([7; 32])),
+            stored_registration(None),
+            revealed,
+        ]);
+        assert_eq!(host.watched_commit_txids, BTreeSet::from([[7; 32]]));
     }
 
     #[test]
