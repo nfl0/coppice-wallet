@@ -2078,4 +2078,74 @@ mod tests {
         assert_eq!(cached.tip_height, first.tip_height);
         assert_eq!(cached.compact_blocks_scanned, 0);
     }
+
+    /// Run twice in distinct processes with the same restart DB: first with
+    /// phase `seed`, then `restore`. The second process has a different
+    /// process-only cache key and must replay instead of trusting the cache.
+    #[tokio::test]
+    #[ignore = "requires two processes and a live Zakura/Zaino regtest endpoint"]
+    async fn live_restart_rejects_unsealed_cache_and_replays() {
+        let lightwalletd_url = std::env::var("COPPICE_NAMES_TEST_LIGHTWALLETD")
+            .unwrap_or_else(|_| "http://127.0.0.1:9067".into());
+        let db_path = std::env::var("COPPICE_NAMES_RESTART_DB")
+            .expect("COPPICE_NAMES_RESTART_DB is required");
+        let phase = std::env::var("COPPICE_NAMES_RESTART_PHASE")
+            .expect("COPPICE_NAMES_RESTART_PHASE is required");
+        let name = "restart-owned";
+
+        match phase.as_str() {
+            "seed" => {
+                configure(&db_path, WalletNetwork::Regtest, 128).unwrap();
+                let first = resolve_name(&db_path, &lightwalletd_url, WalletNetwork::Regtest, name)
+                    .await
+                    .unwrap();
+                assert_eq!(first.status, "missing");
+                assert!(first.compact_blocks_scanned > 0);
+                store_registration(
+                    &db_path,
+                    StoredRegistration {
+                        account_uuid: "restart-account".into(),
+                        name: name.into(),
+                        ua: "uregtest1recovery-hint-only".into(),
+                        commitment: [3; 32],
+                        target_epoch: 1,
+                        target_reveal_height: 20,
+                        send_flow_id: None,
+                        bond_txid: None,
+                        bond_output_index: None,
+                        commit_height: None,
+                        commit_tx_index: None,
+                        phase: "awaiting_bond".into(),
+                        commit_txid: None,
+                        reveal_txid: None,
+                    },
+                )
+                .unwrap();
+                assert!(load_for_sync(&db_path, WalletNetwork::Regtest)
+                    .unwrap()
+                    .is_some());
+            }
+            "restore" => {
+                assert_eq!(
+                    status(&db_path, WalletNetwork::Regtest).unwrap().state,
+                    "needs_bootstrap"
+                );
+                assert!(load_for_sync(&db_path, WalletNetwork::Regtest)
+                    .unwrap()
+                    .is_none());
+                assert!(requires_managed_scanning(&db_path).unwrap());
+                let rebuilt =
+                    resolve_name(&db_path, &lightwalletd_url, WalletNetwork::Regtest, name)
+                        .await
+                        .unwrap();
+                assert_eq!(rebuilt.status, "missing");
+                assert!(rebuilt.compact_blocks_scanned > 0);
+                let warm = resolve_name(&db_path, &lightwalletd_url, WalletNetwork::Regtest, name)
+                    .await
+                    .unwrap();
+                assert_eq!(warm.compact_blocks_scanned, 0);
+            }
+            other => panic!("unsupported restart phase {other}"),
+        }
+    }
 }
