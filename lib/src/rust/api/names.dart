@@ -49,6 +49,26 @@ List<ApiManagedName> getManagedNames({
   accountUuid: accountUuid,
 );
 
+/// Explicitly recovers one already-owned name into `Your names`. This is
+/// intentionally separate from ordinary resolution: it authenticates the
+/// exact current head, verifies seed-derived ownership, and retains the
+/// existing bond witness without broadcasting a transaction.
+Future<void> recoverNamesRegistration({
+  required String dbPath,
+  required String lightwalletdUrl,
+  required String network,
+  required String accountUuid,
+  required String name,
+  required List<int> mnemonicBytes,
+}) => RustLib.instance.api.crateApiNamesRecoverNamesRegistration(
+  dbPath: dbPath,
+  lightwalletdUrl: lightwalletdUrl,
+  network: network,
+  accountUuid: accountUuid,
+  name: name,
+  mnemonicBytes: mnemonicBytes,
+);
+
 /// Persist a registration intent before the wallet prepares an exact bond.
 /// If an eligible note already exists it is immediately reserved; otherwise
 /// sync will reserve the self-transfer output as soon as it is confirmed.

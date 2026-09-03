@@ -114,6 +114,110 @@ fn marked_names_block_fragment(
     Ok((result.subtree, result.checkpoints))
 }
 
+/// Retains the already-scanned Ironwood note commitment for a recovered
+/// Coppice Names bond. Recovery downloads only the producer block, verifies
+/// the exact transaction/action/commitment selected by authenticated Names
+/// replay, and overlays a mark onto the wallet's existing commitment tree.
+/// It neither scans for names nor changes canonical chain state.
+pub(crate) async fn mark_recovered_names_bond(
+    db_path: &str,
+    lightwalletd_url: &str,
+    network: WalletNetwork,
+    producer: coppice_names::protocol::StateRef,
+    position: u32,
+    expected_commitment: [u8; 32],
+    authenticated_tip_height: u32,
+    authenticated_tip_hash: [u8; 32],
+) -> Result<(), String> {
+    let mut client = open_isolated_lwd_channel(lightwalletd_url)
+        .await
+        .map_err(|error| format!("open Names recovery channel: {error}"))?;
+    let height = BlockHeight::from_u32(producer.height);
+    let mut blocks = download_blocks_vec(&mut client, height, height, network)
+        .await
+        .map_err(|error| format!("download recovered Names producer block: {error}"))?;
+    if blocks.len() != 1 {
+        return Err(format!(
+            "Names recovery expected one producer block, received {}",
+            blocks.len()
+        ));
+    }
+    let block = blocks.pop().expect("single producer block is present");
+    if block.height != u64::from(producer.height) {
+        return Err("Names recovery received the wrong producer height".into());
+    }
+
+    let mut leaves = Vec::new();
+    let mut target_offset = None;
+    for transaction in &block.vtx {
+        let tx_index = u32::try_from(transaction.index)
+            .map_err(|_| "Names recovery transaction index exceeds u32".to_string())?;
+        let txid = <[u8; 32]>::try_from(transaction.txid.as_slice())
+            .map_err(|_| "Names recovery compact transaction has an invalid txid".to_string())?;
+        for (action_index, action) in transaction.ironwood_actions.iter().enumerate() {
+            let action_index = u32::try_from(action_index)
+                .map_err(|_| "Names recovery action index exceeds u32".to_string())?;
+            let commitment = <[u8; 32]>::try_from(action.cmx.as_slice()).map_err(|_| {
+                "Names recovery compact action has an invalid commitment".to_string()
+            })?;
+            let is_target = tx_index == producer.tx_index
+                && txid == producer.txid
+                && action_index == producer.action_index;
+            if is_target {
+                if commitment != expected_commitment {
+                    return Err(
+                        "recovered Names producer commitment differs from authenticated head"
+                            .into(),
+                    );
+                }
+                if target_offset.replace(leaves.len()).is_some() {
+                    return Err("Names recovery producer action is duplicated".into());
+                }
+            }
+            leaves.push(crate::wallet::coppice::ManagedLeaf {
+                commitment,
+                mark: is_target,
+            });
+        }
+    }
+    let target_offset = target_offset.ok_or_else(|| {
+        "authenticated Names producer action is absent from its block".to_string()
+    })?;
+    let target_offset = u32::try_from(target_offset)
+        .map_err(|_| "Names recovery block action offset exceeds u32".to_string())?;
+    let start_position = position.checked_sub(target_offset).ok_or_else(|| {
+        "authenticated Names position precedes its producer block action offset".to_string()
+    })?;
+
+    let canonical_tip_hash =
+        get_compact_block_hash(&mut client, u64::from(authenticated_tip_height))
+            .await
+            .map_err(|error| format!("recheck Names recovery chain: {error}"))?;
+    if canonical_tip_hash.0 != authenticated_tip_hash {
+        return Err("the chain changed during Names recovery; synchronize and try again".into());
+    }
+
+    with_wallet_db_write_lock("sync_engine.mark_recovered_names_bond", || {
+        let mut db = crate::wallet::sync::open_wallet_db(db_path, network)?;
+        db.transactionally(|tx_db| -> Result<(), SqliteClientError> {
+            tx_db
+                .with_ironwood_tree_mut(|tree| -> Result<(), SqliteClientError> {
+                    let (subtree, checkpoints) =
+                        marked_names_block_fragment(start_position, &leaves)?;
+                    tree.insert_tree(subtree, checkpoints)
+                        .map(|_| ())
+                        .map_err(SqliteClientError::from)
+                })?
+                .ok_or_else(|| {
+                    SqliteClientError::CorruptedData(
+                        "Ironwood commitment tree is unavailable".into(),
+                    )
+                })
+        })
+        .map_err(|error| format!("retain recovered Names bond witness: {error}"))
+    })
+}
+
 use enhance::run_enhancement;
 pub(crate) use error::SyncError;
 use error::{RecoveryStrategy, MAX_REWINDS_PER_RUN};

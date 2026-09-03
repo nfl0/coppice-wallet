@@ -1070,6 +1070,32 @@ pub(crate) fn store_registration(
     })
 }
 
+/// Associates an already-authenticated canonical name with one wallet
+/// account after seed-based ownership recovery. Unlike a registration draft,
+/// this must be globally unique within the wallet: the per-name authority is
+/// derived from the wallet seed, not from an account index, so assigning the
+/// same bond to two accounts would double-count wallet holdings.
+pub(crate) fn store_recovered_registration(
+    db_path: &str,
+    registration: StoredRegistration,
+) -> Result<(), String> {
+    update_stored(db_path, |stored| {
+        if let Some(existing) = stored
+            .registrations
+            .iter()
+            .find(|existing| existing.name == registration.name)
+        {
+            return if existing.account_uuid == registration.account_uuid {
+                Err("this account already manages that name".into())
+            } else {
+                Err("that name is already assigned to another account in this wallet".into())
+            };
+        }
+        stored.registrations.push(registration);
+        Ok(())
+    })
+}
+
 pub(crate) fn replace_registration(
     db_path: &str,
     registration: StoredRegistration,
@@ -1306,6 +1332,17 @@ pub(crate) fn accepted_managed_resolution(
         .managed_resolutions()
         .into_iter()
         .find(|resolution| resolution.name == canonical.as_str()))
+}
+
+pub(crate) fn authenticated_tip(
+    db_path: &str,
+    network: WalletNetwork,
+) -> Result<(u32, [u8; 32]), String> {
+    let stored = read_stored(&sidecar_path(db_path))?
+        .ok_or_else(|| "Names is not configured".to_string())?;
+    let host = host_from_stored(network, &stored)?
+        .ok_or_else(|| "Names must be bootstrapped before recovery".to_string())?;
+    Ok((host.core.tip().height, host.core.tip().block_hash))
 }
 
 pub(crate) fn managed_registrations(

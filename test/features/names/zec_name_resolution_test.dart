@@ -125,6 +125,25 @@ void main() {
       }
     });
 
+    test('cooldown does not claim former-owner priority', () {
+      expect(
+        () => zecNameResolutionFromApi('alice.zec', resolution('cooldown')),
+        throwsA(
+          isA<ZecNameResolutionException>()
+              .having(
+                (error) => error.message,
+                'message',
+                contains('cannot be registered by anyone'),
+              )
+              .having(
+                (error) => error.message,
+                'message',
+                isNot(contains('previous owner')),
+              ),
+        ),
+      );
+    });
+
     test('refusals carry the lifecycle status for programmatic use', () {
       try {
         zecNameResolutionFromApi('alice.zec', resolution('missing'));

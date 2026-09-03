@@ -112,6 +112,78 @@ class _NamesViewState extends ConsumerState<NamesView> {
     ref.read(nameLookupProvider.notifier).resolve(name);
   }
 
+  Future<void> _recoverName() async {
+    var proposedName = '';
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Recover a name'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Enter one name owned by this wallet. Coppice will authenticate '
+              'its current state and verify the bond locally. No transaction '
+              'is created.',
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            TextFormField(
+              key: const ValueKey('names_recovery_field'),
+              autofocus: true,
+              onChanged: (value) => proposedName = value,
+              onFieldSubmitted: (value) {
+                final trimmed = value.trim();
+                if (trimmed.isNotEmpty) Navigator.pop(context, trimmed);
+              },
+              decoration: const InputDecoration(
+                labelText: 'Name',
+                hintText: 'hodl.zec',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            key: const ValueKey('names_recovery_confirm'),
+            onPressed: () {
+              final trimmed = proposedName.trim();
+              if (trimmed.isNotEmpty) Navigator.pop(context, trimmed);
+            },
+            child: const Text('Recover name'),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty || !mounted) return;
+
+    final canonical = name.trim().toLowerCase().replaceFirst(
+      RegExp(r'\.zec$'),
+      '',
+    );
+    setState(() {
+      _managedNameInFlight = canonical;
+      _managedNameError = null;
+    });
+    final error = await ref.read(managedNamesProvider.notifier).recover(name);
+    if (!mounted) return;
+    if (error == null) {
+      await _refreshNamesAfterCompletedSync();
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Recovered $canonical.zec')));
+    }
+    setState(() {
+      _managedNameInFlight = null;
+      _managedNameError = error;
+    });
+  }
+
   void _sendToResolution(ZecNameResolution resolution) {
     final args = SendPrefillArgs(
       id: 'names-${resolution.name}',
@@ -128,9 +200,20 @@ class _NamesViewState extends ConsumerState<NamesView> {
     final notifier = ref.read(namesRegistrationProvider.notifier);
     var registration = ref.read(namesRegistrationProvider);
     final enteredName = _registrationNameController.text.trim().toLowerCase();
-    if (registration.draftName == null ||
-        (registration.draftPhase == 'active' &&
-            registration.draftName != enteredName)) {
+    const resumableDraftPhases = {
+      'awaiting_bond',
+      'bond_reserved',
+      'commit_proposed',
+      'commit_broadcast',
+      'commit_accepted',
+      'reveal_broadcast',
+      'window_missed',
+      'commit_expired',
+    };
+    final selectedDraftMatches =
+        registration.draftName == enteredName &&
+        resumableDraftPhases.contains(registration.draftPhase);
+    if (!selectedDraftMatches) {
       if (registration.draftName != null) notifier.resetDraft();
       await notifier.prepareDraft(
         name: _registrationNameController.text,
@@ -473,9 +556,11 @@ class _NamesViewState extends ConsumerState<NamesView> {
                   names: managedNames,
                   bootstrapRequired:
                       statusAsync.value?.state == 'needs_bootstrap',
+                  recoveryAvailable: lookupAvailable,
                   onBootstrap: () => ref
                       .read(namesStatusProvider.notifier)
                       .bootstrapFromActiveEndpoint(),
+                  onRecover: _recoverName,
                   inFlightName: _managedNameInFlight,
                   error: _managedNameError,
                   onReveal: _revealName,
@@ -1044,7 +1129,9 @@ class _ManagedNamesCard extends StatelessWidget {
   const _ManagedNamesCard({
     required this.names,
     required this.bootstrapRequired,
+    required this.recoveryAvailable,
     required this.onBootstrap,
+    required this.onRecover,
     required this.inFlightName,
     required this.error,
     required this.onReveal,
@@ -1056,7 +1143,9 @@ class _ManagedNamesCard extends StatelessWidget {
 
   final AsyncValue<List<rust_names.ApiManagedName>> names;
   final bool bootstrapRequired;
+  final bool recoveryAvailable;
   final VoidCallback onBootstrap;
+  final VoidCallback onRecover;
   final String? inFlightName;
   final String? error;
   final ValueChanged<String> onReveal;
@@ -1081,6 +1170,18 @@ class _ManagedNamesCard extends StatelessWidget {
                 ),
               ),
             ),
+            AppButton(
+              key: const ValueKey('names_recovery_button'),
+              variant: AppButtonVariant.secondary,
+              size: AppButtonSize.medium,
+              onPressed: recoveryAvailable && inFlightName == null
+                  ? onRecover
+                  : null,
+              child: inFlightName != null
+                  ? const _InlineSpinner()
+                  : const Text('Recover name'),
+            ),
+            const SizedBox(width: AppSpacing.xs),
             AppIconHoverButton(
               icon: AppIcons.sync,
               semanticLabel: 'Refresh managed names',
@@ -1319,7 +1420,7 @@ String _managedPhaseLabel(String phase) => switch (phase) {
   'commit_expired' => 'COMMIT expired before REVEAL',
   'reveal_broadcast' => 'REVEAL broadcast — awaiting confirmation',
   'active' => 'Active',
-  'cooldown' => 'Expired — reserved for the previous owner',
+  'cooldown' => 'Cooldown — registration temporarily unavailable',
   'claimable' => 'Available to register',
   _ => phase.replaceAll('_', ' '),
 };

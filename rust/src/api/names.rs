@@ -261,6 +261,34 @@ pub fn get_managed_names(
         .collect()
 }
 
+/// Explicitly recovers one already-owned name into `Your names`. This is
+/// intentionally separate from ordinary resolution: it authenticates the
+/// exact current head, verifies seed-derived ownership, and retains the
+/// existing bond witness without broadcasting a transaction.
+pub fn recover_names_registration(
+    db_path: String,
+    lightwalletd_url: String,
+    network: String,
+    account_uuid: String,
+    name: String,
+    mnemonic_bytes: Vec<u8>,
+) -> Result<(), String> {
+    let network = keys::parse_network(&network)?;
+    keys::ensure_db_migrated_once(&db_path, network)?;
+    let mnemonic_bytes = Zeroizing::new(mnemonic_bytes);
+    let seed = keys::mnemonic_bytes_to_seed(mnemonic_bytes.as_slice())?;
+    drop(mnemonic_bytes);
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| format!("tokio: {error}"))?;
+    runtime.block_on(crate::wallet::names_lifecycle::recover_registration(
+        &db_path,
+        &lightwalletd_url,
+        network,
+        &account_uuid,
+        &name,
+        seed,
+    ))
+}
+
 /// Persist a registration intent before the wallet prepares an exact bond.
 /// If an eligible note already exists it is immediately reserved; otherwise
 /// sync will reserve the self-transfer output as soon as it is confirmed.

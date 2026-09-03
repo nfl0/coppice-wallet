@@ -337,6 +337,19 @@ String _friendlyRegistrationError(Object error) {
   return text.replaceFirst(RegExp(r'^Exception:\s*'), '');
 }
 
+String _friendlyRecoveryError(Object error) {
+  final text = error.toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
+  final lower = text.toLowerCase();
+  if (lower.contains('does not own')) {
+    return 'This wallet does not own the accepted bond for that name.';
+  }
+  if (lower.contains('not currently owned') ||
+      lower.contains('no authenticated names state')) {
+    return 'That name has no recoverable owner state.';
+  }
+  return text;
+}
+
 /// Coppice/Names wallet status for the active network, or `null` while no
 /// account is active (the Rust host requires the wallet DB to exist).
 final namesStatusProvider =
@@ -374,6 +387,49 @@ class ManagedNamesNotifier
   Future<void> refresh() async {
     ref.invalidateSelf();
     await future;
+  }
+
+  /// Explicitly recovers one user-supplied name. Ordinary lookup never calls
+  /// this method and therefore never derives ownership or mutates `Your names`.
+  Future<String?> recover(String name) async {
+    final account = ref.read(accountProvider).value;
+    final accountUuid = account?.activeAccountUuid;
+    if (accountUuid == null) return 'Unlock your wallet first.';
+    final accountNotifier = ref.read(accountProvider.notifier);
+    if (accountNotifier.isHardwareAccount(accountUuid)) {
+      return 'Names recovery currently requires a software account.';
+    }
+    final mnemonicBytes = await accountNotifier.getMnemonicBytesForAccount(
+      accountUuid,
+    );
+    if (mnemonicBytes == null || mnemonicBytes.isEmpty) {
+      return 'The selected account credential is unavailable.';
+    }
+    final endpoint = ref.read(rpcEndpointProvider);
+    try {
+      late final Future<void> recoveryFuture;
+      try {
+        recoveryFuture = rust_names.recoverNamesRegistration(
+          dbPath: await getWalletDbPath(),
+          lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
+          network: endpoint.networkName,
+          accountUuid: accountUuid,
+          name: name,
+          mnemonicBytes: mnemonicBytes,
+        );
+      } finally {
+        mnemonicBytes.fillRange(0, mnemonicBytes.length, 0);
+      }
+      await recoveryFuture;
+      if (ref.mounted) {
+        ref.invalidateSelf();
+        ref.invalidate(namesStatusProvider);
+      }
+      return null;
+    } catch (error) {
+      log('Names: recovery failed: $error');
+      return _friendlyRecoveryError(error);
+    }
   }
 
   Future<String?> reveal(String name) async {

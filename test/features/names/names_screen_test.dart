@@ -131,6 +131,87 @@ class _ReviewManagementNotifier extends ManagedNamesNotifier {
   }
 }
 
+rust_names.ApiManagedName _managedName(String name) =>
+    rust_names.ApiManagedName(
+      name: name,
+      paymentAddress: 'uregtest1destination',
+      phase: 'active',
+      commitment: Uint8List.fromList([1, 2, 3]),
+      commitWindowStart: BigInt.zero,
+      commitWindowEnd: BigInt.zero,
+      commitBlocksUntil: BigInt.zero,
+      commitWindowOpen: false,
+      revealWindowStart: BigInt.zero,
+      revealWindowEnd: BigInt.zero,
+      revealBlocksUntil: BigInt.zero,
+      revealWindowOpen: false,
+      refreshWindowStart: BigInt.from(100),
+      refreshWindowEnd: BigInt.from(104),
+      refreshBlocksUntil: BigInt.zero,
+      refreshWindowOpen: true,
+    );
+
+class _RecoveryManagedNamesNotifier extends ManagedNamesNotifier {
+  static List<rust_names.ApiManagedName> items = const [];
+  static String? recovered;
+
+  @override
+  Future<List<rust_names.ApiManagedName>> build() async => items;
+
+  @override
+  Future<String?> recover(String name) async {
+    recovered = name;
+    return null;
+  }
+}
+
+class _CooldownRegistrationNotifier extends NamesRegistrationNotifier {
+  static int prepareCalls = 0;
+
+  @override
+  NamesRegistrationState build() => NamesRegistrationState(
+    bondStatus: rust_names.ApiNamesBondStatus(
+      state: 'needs_preparation',
+      requiredZatoshi: BigInt.from(kNamesBondZatoshis),
+      exactNoteCount: 0,
+      spendableIronwoodZatoshi: BigInt.from(kNamesBondZatoshis),
+    ),
+    draftName: 'hodl',
+    draftPaymentAddress: 'uregtest1destination',
+    draftPhase: 'cooldown',
+  );
+
+  @override
+  Future<rust_names.ApiNamesBondStatus?> refreshBondStatus() async =>
+      state.bondStatus;
+
+  @override
+  Future<void> refreshDraftPhase() async {}
+
+  @override
+  Future<String?> prepareDraft({
+    required String name,
+    required String paymentAddress,
+  }) async {
+    prepareCalls += 1;
+    state = NamesRegistrationState(
+      bondStatus: state.bondStatus,
+      error:
+          'That name is in protocol cooldown and cannot be registered until height 1201.',
+    );
+    return null;
+  }
+}
+
+class _ActiveAccountNotifier extends AccountNotifier {
+  @override
+  FutureOr<AccountState> build() => const AccountState(
+    accounts: [AccountInfo(uuid: 'software-account', name: 'Wallet', order: 0)],
+    activeAccountUuid: 'software-account',
+    activeAddress: 'uregtest1destination',
+  );
+}
+
 class _EmptyAccountNotifier extends AccountNotifier {
   @override
   FutureOr<AccountState> build() => const AccountState();
@@ -174,6 +255,120 @@ void main() {
     expect(find.text('Wallet locked'), findsNothing);
     expect(
       find.byKey(const ValueKey('names_status_retry_button')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('recover name is explicit and remains available with no names', (
+    tester,
+  ) async {
+    _RecoveryManagedNamesNotifier.items = const [];
+    _RecoveryManagedNamesNotifier.recovered = null;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          namesDeploymentProfileProvider.overrideWithValue(
+            kLocalRegtestNamesDeploymentProfile,
+          ),
+          namesStatusProvider.overrideWith(() => _ReadyNamesStatusNotifier()),
+          managedNamesProvider.overrideWith(_RecoveryManagedNamesNotifier.new),
+        ],
+        child: const MaterialApp(
+          home: AppTheme(
+            data: AppThemeData.light,
+            child: Scaffold(body: NamesView(showDesktopChrome: false)),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('names_recovery_button')), findsOneWidget);
+    expect(_RecoveryManagedNamesNotifier.recovered, isNull);
+
+    final recoveryButton = find.byKey(const ValueKey('names_recovery_button'));
+    await tester.ensureVisible(recoveryButton);
+    await tester.tap(recoveryButton);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('names_recovery_field')),
+      'hodl.zec',
+    );
+    await tester.tap(find.byKey(const ValueKey('names_recovery_confirm')));
+    await tester.pumpAndSettle();
+
+    expect(_RecoveryManagedNamesNotifier.recovered, 'hodl.zec');
+  });
+
+  testWidgets('recover name remains available alongside multiple names', (
+    tester,
+  ) async {
+    _RecoveryManagedNamesNotifier.items = [
+      _managedName('first'),
+      _managedName('second'),
+    ];
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          namesDeploymentProfileProvider.overrideWithValue(
+            kLocalRegtestNamesDeploymentProfile,
+          ),
+          namesStatusProvider.overrideWith(() => _ReadyNamesStatusNotifier()),
+          managedNamesProvider.overrideWith(_RecoveryManagedNamesNotifier.new),
+        ],
+        child: const MaterialApp(
+          home: AppTheme(
+            data: AppThemeData.light,
+            child: Scaffold(body: NamesView(showDesktopChrome: false)),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('first.zec'), findsOneWidget);
+    expect(find.text('second.zec'), findsOneWidget);
+    expect(find.byKey(const ValueKey('names_recovery_button')), findsOneWidget);
+  });
+
+  testWidgets('cooldown registration click reports protocol state', (
+    tester,
+  ) async {
+    _CooldownRegistrationNotifier.prepareCalls = 0;
+    _RecoveryManagedNamesNotifier.items = [_managedName('hodl')];
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          accountProvider.overrideWith(_ActiveAccountNotifier.new),
+          namesDeploymentProfileProvider.overrideWithValue(
+            kLocalRegtestNamesDeploymentProfile,
+          ),
+          namesStatusProvider.overrideWith(() => _ReadyNamesStatusNotifier()),
+          namesRegistrationProvider.overrideWith(
+            _CooldownRegistrationNotifier.new,
+          ),
+          managedNamesProvider.overrideWith(_RecoveryManagedNamesNotifier.new),
+        ],
+        child: const MaterialApp(
+          home: AppTheme(
+            data: AppThemeData.light,
+            child: Scaffold(body: NamesView(showDesktopChrome: false)),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final button = find.byKey(const ValueKey('names_registration_button'));
+    await tester.ensureVisible(button);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+
+    expect(_CooldownRegistrationNotifier.prepareCalls, 1);
+    expect(
+      find.text(
+        'That name is in protocol cooldown and cannot be registered until height 1201.',
+      ),
       findsOneWidget,
     );
   });

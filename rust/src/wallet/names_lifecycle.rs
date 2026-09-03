@@ -3,6 +3,7 @@
 use coppice_names::{
     proof::keygen,
     protocol::{CanonicalUa, FieldElement, Name},
+    reducer::Lifecycle,
 };
 use coppice_names_wallet::{
     builder::{
@@ -162,9 +163,29 @@ pub(crate) fn prepare_registration_draft(
 ) -> Result<(), String> {
     let context = coppice::lifecycle_context(db_path, network)?;
     let name = canonical_registration_name(name)?;
-    if coppice::registration(db_path, account_uuid, name.as_str())?.is_some() {
-        return Err("this account already manages that name".into());
-    }
+    let existing = coppice::registration(db_path, account_uuid, name.as_str())?;
+    let replace_claimable = if existing.is_some() {
+        let resolution = coppice::accepted_managed_resolution(db_path, network, name.as_str())?
+            .ok_or_else(|| "this account already has a workflow for that name".to_string())?;
+        match resolution.lifecycle {
+            Lifecycle::Active => return Err("this account already manages that active name".into()),
+            Lifecycle::Cooldown => {
+                let head = resolution
+                    .head
+                    .ok_or_else(|| "cooldown name has no accepted canonical head".to_string())?;
+                let terminal = head.terminal_height.unwrap_or(head.expiry_height);
+                let claimable_height = terminal
+                    .checked_add(context.parameters.cooldown_blocks)
+                    .ok_or_else(|| "Names claimable height overflow".to_string())?;
+                return Err(format!(
+                    "that name is in protocol cooldown and cannot be registered until height {claimable_height}"
+                ));
+            }
+            Lifecycle::Claimable | Lifecycle::Missing => true,
+        }
+    } else {
+        false
+    };
     let ua = CanonicalUa::parse(context.network, payment_address)
         .map_err(|error| format!("invalid canonical Unified Address: {error:?}"))?;
     let next_height = context
@@ -186,25 +207,30 @@ pub(crate) fn prepare_registration_draft(
         coppice_names::codec::Operation::Commit { commitment } => commitment.to_bytes(),
         _ => return Err("prepared Names operation is not COMMIT".into()),
     };
-    coppice::store_registration(
-        db_path,
-        StoredRegistration {
-            account_uuid: account_uuid.into(),
-            name: name.as_str().into(),
-            ua: ua.as_str().into(),
-            commitment,
-            target_epoch,
-            target_reveal_height: reveal_height,
-            send_flow_id: None,
-            bond_txid: None,
-            bond_output_index: None,
-            commit_height: None,
-            commit_tx_index: None,
-            phase: "awaiting_bond".into(),
-            commit_txid: None,
-            reveal_txid: None,
-        },
-    )?;
+    let registration = StoredRegistration {
+        account_uuid: account_uuid.into(),
+        name: name.as_str().into(),
+        ua: ua.as_str().into(),
+        commitment,
+        target_epoch,
+        target_reveal_height: reveal_height,
+        send_flow_id: None,
+        bond_txid: None,
+        bond_output_index: None,
+        commit_height: None,
+        commit_tx_index: None,
+        phase: "awaiting_bond".into(),
+        commit_txid: None,
+        reveal_txid: None,
+    };
+    if replace_claimable {
+        // A released or expired name has no special former-owner priority once
+        // claimable. Reuse the local row only after canonical replay says a
+        // fresh public registration is permitted.
+        coppice::replace_registration(db_path, registration)?;
+    } else {
+        coppice::store_registration(db_path, registration)?;
+    }
     reserve_pending_bonds(db_path, network)?;
 
     // If an exact bond was already spendable, keep the earliest valid target.
@@ -988,6 +1014,129 @@ fn recover_current_bond(
     }
     .map_err(|error| format!("reconstruct current Names bond: {error:?}"))?;
     Ok((fvk, ask, note))
+}
+
+/// Recovers one canonical name into the selected wallet account after an
+/// explicit user request. Exact-name replay authenticates the current head;
+/// seed derivation then proves local ownership by reproducing both the head
+/// commitment and its future nullifier. No transaction is constructed or
+/// broadcast.
+pub(crate) async fn recover_registration(
+    db_path: &str,
+    lightwalletd_url: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+    name: &str,
+    seed: SecretVec<u8>,
+) -> Result<(), String> {
+    let name = canonical_registration_name(name)?;
+    if coppice::registration(db_path, account_uuid, name.as_str())?.is_some() {
+        return Err("this account already manages that name".into());
+    }
+
+    // Ensure the destination account exists and remains software-derived.
+    // The name authority itself is deliberately seed + deployment + name,
+    // independent of a fragile account-local sidecar secret.
+    let account_id = parse_account_uuid(account_uuid)?;
+    let db = open_wallet_db_for_read(db_path, network)?;
+    let account = db
+        .get_account(account_id)
+        .map_err(|error| format!("read Names recovery account: {error}"))?
+        .ok_or_else(|| "Names recovery account not found".to_string())?;
+    account
+        .source()
+        .key_derivation()
+        .ok_or_else(|| "Names recovery requires a software-derived account".to_string())?;
+    drop(db);
+
+    // This is the only entry point that turns exact resolution into ownership
+    // recovery. Ordinary name lookup calls resolve_name independently and
+    // never invokes this function or creates a registration association.
+    coppice::resolve_name(db_path, lightwalletd_url, network, name.as_str()).await?;
+    let context = coppice::lifecycle_context(db_path, network)?;
+    let (authenticated_tip_height, authenticated_tip_hash) =
+        coppice::authenticated_tip(db_path, network)?;
+    let resolution = coppice::accepted_managed_resolution(db_path, network, name.as_str())?
+        .ok_or_else(|| "the name has no authenticated Names state".to_string())?;
+    if !matches!(
+        resolution.lifecycle,
+        Lifecycle::Active | Lifecycle::Cooldown
+    ) {
+        return Err(match resolution.lifecycle {
+            Lifecycle::Claimable | Lifecycle::Missing => {
+                "the name is not currently owned or in its owner recovery period".into()
+            }
+            Lifecycle::Active | Lifecycle::Cooldown => unreachable!(),
+        });
+    }
+    let head = resolution
+        .head
+        .ok_or_else(|| "the name has no accepted canonical head".to_string())?;
+    let origin = resolution
+        .bond_origin
+        .ok_or_else(|| "current Names bond recovery metadata is unavailable".to_string())?;
+    let position = resolution
+        .marked_position
+        .ok_or_else(|| "current Names bond position is unavailable".to_string())?;
+
+    let (name_fvk, _, bond_note) = recover_current_bond(
+        seed.expose_secret(),
+        context.deployment,
+        context.network,
+        &name,
+        origin,
+    )?;
+    let recovered_commitment = FieldElement::from_bytes(
+        orchard::note::ExtractedNoteCommitment::from(bond_note.commitment()).to_bytes(),
+    )
+    .map_err(|error| format!("derive recovered bond commitment: {error:?}"))?;
+    let recovered_nullifier =
+        FieldElement::from_bytes(bond_note.nullifier(&name_fvk).to_bytes())
+            .map_err(|error| format!("derive recovered bond nullifier: {error:?}"))?;
+    drop(seed);
+    if recovered_commitment != head.commitment || recovered_nullifier != head.future_nf {
+        return Err("this wallet does not own the accepted canonical Names bond".into());
+    }
+
+    // The resolver knows the absolute authenticated action position, while
+    // the producer block supplies the surrounding commitments needed to add a
+    // late retention mark without rescanning or rebuilding the wallet tree.
+    super::sync_engine::mark_recovered_names_bond(
+        db_path,
+        lightwalletd_url,
+        network,
+        head.producer,
+        position,
+        head.commitment.to_bytes(),
+        authenticated_tip_height,
+        authenticated_tip_hash,
+    )
+    .await?;
+
+    coppice::store_recovered_registration(
+        db_path,
+        StoredRegistration {
+            account_uuid: account_uuid.into(),
+            name: name.as_str().into(),
+            ua: head.ua.as_str().into(),
+            commitment: head.commitment.to_bytes(),
+            target_epoch: head.producer_epoch,
+            target_reveal_height: head.producer.height,
+            send_flow_id: None,
+            bond_txid: None,
+            bond_output_index: None,
+            commit_height: None,
+            commit_tx_index: None,
+            phase: match resolution.lifecycle {
+                Lifecycle::Active => "active",
+                Lifecycle::Cooldown => "cooldown",
+                Lifecycle::Claimable | Lifecycle::Missing => unreachable!(),
+            }
+            .into(),
+            commit_txid: None,
+            reveal_txid: None,
+        },
+    )
 }
 
 #[derive(Clone, Debug)]

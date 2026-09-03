@@ -160,7 +160,7 @@ ZecNameResolution zecNameResolutionFromApi(
       );
     case 'cooldown':
       throw ZecNameResolutionException(
-        '`$name` has expired and is reserved temporarily for its previous owner',
+        '`$name` is in cooldown and cannot be registered by anyone yet',
         status: resolution.status,
       );
     case 'claimable':
