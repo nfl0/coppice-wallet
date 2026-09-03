@@ -50,6 +50,8 @@ class NamesRegistrationState {
     this.draftName,
     this.draftPaymentAddress,
     this.draftPhase,
+    this.commitBlocksUntil,
+    this.commitWindowOpen = false,
     this.error,
   });
 
@@ -58,6 +60,8 @@ class NamesRegistrationState {
   final String? draftName;
   final String? draftPaymentAddress;
   final String? draftPhase;
+  final BigInt? commitBlocksUntil;
+  final bool commitWindowOpen;
   final String? error;
 }
 
@@ -222,6 +226,8 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
         draftName: draftName,
         draftPaymentAddress: state.draftPaymentAddress,
         draftPhase: draft.phase,
+        commitBlocksUntil: draft.commitBlocksUntil,
+        commitWindowOpen: draft.commitWindowOpen,
       );
     } catch (error) {
       log('Names: registration draft refresh failed: $error');

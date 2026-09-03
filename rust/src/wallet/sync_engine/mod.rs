@@ -65,9 +65,9 @@ impl From<rusqlite::Error> for AtomicScanError {
     }
 }
 
-fn marked_names_leaf_fragment(
-    position: u32,
-    commitment: [u8; 32],
+fn marked_names_block_fragment(
+    start_position: u32,
+    leaves: &[crate::wallet::coppice::ManagedLeaf],
 ) -> Result<
     (
         LocatedPrunableTree<orchard::tree::MerkleHashOrchard>,
@@ -75,17 +75,38 @@ fn marked_names_leaf_fragment(
     ),
     SqliteClientError,
 > {
-    let hash = Option::<orchard::tree::MerkleHashOrchard>::from(
-        orchard::tree::MerkleHashOrchard::from_bytes(&commitment),
-    )
-    .ok_or_else(|| {
-        SqliteClientError::CorruptedData("Names successor commitment is noncanonical".into())
-    })?;
-    let position = Position::from(u64::from(position));
+    let start = Position::from(u64::from(start_position));
+    let end = start
+        + u64::try_from(leaves.len()).map_err(|_| {
+            SqliteClientError::CorruptedData("Names block action count exceeds u64".into())
+        })?;
+    let retained = leaves
+        .iter()
+        .map(|leaf| {
+            Option::<orchard::tree::MerkleHashOrchard>::from(
+                orchard::tree::MerkleHashOrchard::from_bytes(&leaf.commitment),
+            )
+            .map(|hash| {
+                (
+                    hash,
+                    if leaf.mark {
+                        Retention::Marked
+                    } else {
+                        Retention::Ephemeral
+                    },
+                )
+            })
+            .ok_or_else(|| {
+                SqliteClientError::CorruptedData(
+                    "Names block contains a noncanonical commitment".into(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let result = LocatedPrunableTree::from_iter::<BlockHeight, _>(
-        position..position + 1,
+        start..end,
         Level::new(0),
-        std::iter::once((hash, Retention::Marked)),
+        retained.into_iter(),
     )
     .ok_or_else(|| {
         SqliteClientError::CorruptedData("cannot construct marked Names tree fragment".into())
@@ -3280,38 +3301,27 @@ async fn run_sync_impl(
                     tx_db
                         .with_ironwood_tree_mut(|tree| -> Result<(), SqliteClientError> {
                             for delta in deltas {
-                                for (leaf_index, leaf) in
-                                    delta.leaves.iter().enumerate().filter(|(_, leaf)| leaf.mark)
-                                {
-                                    let position = delta
-                                        .block_start_position
-                                        .ok_or_else(|| {
-                                            SqliteClientError::CorruptedData(
-                                                "marked Names block has no Ironwood start position"
-                                                    .into(),
-                                            )
-                                        })?
-                                        .checked_add(
-                                            u32::try_from(leaf_index).unwrap_or(u32::MAX),
+                                if delta.leaves.iter().any(|leaf| leaf.mark) {
+                                    let start_position = delta.block_start_position.ok_or_else(|| {
+                                        SqliteClientError::CorruptedData(
+                                            "marked Names block has no Ironwood start position"
+                                                .into(),
                                         )
-                                        .ok_or_else(|| {
-                                            SqliteClientError::CorruptedData(
-                                                "Names action position overflow".into(),
-                                            )
-                                        })?;
-                                    let (subtree, checkpoints) =
-                                        marked_names_leaf_fragment(position, leaf.commitment)?;
+                                    })?;
+                                    let (subtree, checkpoints) = marked_names_block_fragment(
+                                        start_position,
+                                        &delta.leaves,
+                                    )?;
                                     tree.insert_tree(subtree, checkpoints)
                                         .map_err(SqliteClientError::from)?;
                                 }
-                                let checkpoint = BlockHeight::from_u32(delta.height);
-                                for position in &delta.remove_marks {
-                                    tree.remove_mark(
-                                        Position::from(u64::from(*position)),
-                                        Some(&checkpoint),
-                                    )
-                                    .map_err(SqliteClientError::from)?;
-                                }
+                                // Spent Names witnesses are deliberately left
+                                // marked. Removing a mark after the ordinary
+                                // scanner writes the block checkpoint makes a
+                                // later idempotent verify scan conflict with
+                                // that checkpoint's mark-removal metadata.
+                                // Stale marks retain tree data only; they do
+                                // not make spent notes wallet-selectable.
                             }
                             Ok(())
                         })
@@ -5573,7 +5583,7 @@ mod tests {
     }
 
     #[test]
-    fn names_fragment_upgrades_scanned_leaf_to_marked_without_changing_root() {
+    fn names_fragment_restores_block_siblings_and_marks_without_changing_root() {
         use incrementalmerkletree::Marking;
         use shardtree::{store::memory::MemoryShardStore, ShardTree};
 
@@ -5586,17 +5596,38 @@ mod tests {
         .unwrap();
         let checkpoint = BlockHeight::from_u32(7);
         let mut tree = TestTree::new(MemoryShardStore::empty(), 8);
-        tree.append(
-            hash,
-            Retention::Checkpoint {
-                id: checkpoint,
-                marking: Marking::None,
-            },
-        )
-        .unwrap();
+        for index in 0..4 {
+            let retention = if index == 3 {
+                Retention::Checkpoint {
+                    id: checkpoint,
+                    marking: Marking::None,
+                }
+            } else {
+                Retention::Ephemeral
+            };
+            tree.append(hash, retention).unwrap();
+        }
         let root_before = tree.root_at_checkpoint_id(&checkpoint).unwrap();
 
-        let (subtree, checkpoints) = marked_names_leaf_fragment(0, commitment).unwrap();
+        let leaves = [
+            crate::wallet::coppice::ManagedLeaf {
+                commitment,
+                mark: true,
+            },
+            crate::wallet::coppice::ManagedLeaf {
+                commitment,
+                mark: false,
+            },
+            crate::wallet::coppice::ManagedLeaf {
+                commitment,
+                mark: false,
+            },
+            crate::wallet::coppice::ManagedLeaf {
+                commitment,
+                mark: false,
+            },
+        ];
+        let (subtree, checkpoints) = marked_names_block_fragment(0, &leaves).unwrap();
         tree.insert_tree(subtree, checkpoints).unwrap();
 
         assert_eq!(
@@ -5607,6 +5638,10 @@ mod tests {
             tree.marked_positions().unwrap(),
             [Position::from(0)].into_iter().collect()
         );
+        assert!(tree
+            .witness_at_checkpoint_id(Position::from(0), &checkpoint)
+            .unwrap()
+            .is_some());
     }
 
     #[test]

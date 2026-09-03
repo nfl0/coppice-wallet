@@ -107,6 +107,7 @@ pub(crate) struct StoredRegistration {
     pub ua: String,
     pub commitment: [u8; 32],
     pub target_epoch: u32,
+    pub target_reveal_height: u32,
     pub send_flow_id: Option<String>,
     pub bond_txid: Option<[u8; 32]>,
     pub bond_output_index: Option<u32>,
@@ -241,19 +242,19 @@ impl NamesWalletConfig {
     ) -> Result<DeploymentParameters, String> {
         let core = self.validated_core_parameters(network)?;
         let proof = proof_verifier().identity();
-        DeploymentParameters {
-            core_runtime_id: core.core_runtime_id(),
-            activation_height: self.activation_height,
-            epoch_blocks: 1_152,
-            window_blocks: 24,
-            commit_maturity_blocks: 24,
-            commit_ttl_blocks: 192,
-            lease_blocks: 250_000,
-            cooldown_blocks: 1_152,
-            proof,
-        }
-        .validate()
-        .map_err(|error| format!("invalid Names deployment: {error:?}"))
+        let deployment = match network {
+            WalletNetwork::Regtest => {
+                DeploymentParameters::regtest(core.core_runtime_id(), self.activation_height, proof)
+            }
+            WalletNetwork::Main | WalletNetwork::Test => DeploymentParameters::candidate(
+                core.core_runtime_id(),
+                self.activation_height,
+                proof,
+            ),
+        };
+        deployment
+            .validate()
+            .map_err(|error| format!("invalid Names deployment: {error:?}"))
     }
 
     pub(crate) fn parameters(&self, network: WalletNetwork) -> Result<NamesParameters, String> {
@@ -328,6 +329,11 @@ pub(crate) struct ManagedResolution {
     pub bond_origin: Option<BondOrigin>,
 }
 
+pub(crate) struct ManagedRegistration {
+    pub workflow: StoredRegistration,
+    pub resolution: Option<ManagedResolution>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ManagedLeaf {
     pub commitment: [u8; 32],
@@ -339,7 +345,6 @@ pub(crate) struct ManagedBlockDelta {
     pub height: u32,
     pub block_start_position: Option<u32>,
     pub leaves: Vec<ManagedLeaf>,
-    pub remove_marks: Vec<u32>,
     pub accepted_commits: Vec<([u8; 32], coppice_names::protocol::CommitRef)>,
 }
 
@@ -710,7 +715,6 @@ impl NamesWalletHost {
         let network = self.config.network();
         let core_parameters = self.config.validated_core_parameters(self.network)?;
         let mut mark_positions = BTreeMap::new();
-        let mut remove_marks = Vec::new();
         let mut accepted_commits = BTreeMap::new();
 
         for (canonical_name, managed) in &mut self.resolvers {
@@ -721,11 +725,7 @@ impl NamesWalletHost {
 
             for transaction in &block.transactions {
                 for action in &transaction.actions {
-                    if let Some(position) =
-                        managed.bond_positions.remove(&action.nullifier.to_bytes())
-                    {
-                        remove_marks.push(position);
-                    }
+                    managed.bond_positions.remove(&action.nullifier.to_bytes());
                 }
             }
 
@@ -806,8 +806,6 @@ impl NamesWalletHost {
             mark_positions.insert(position, (head.producer.txid, head.producer.action_index));
         }
 
-        remove_marks.sort_unstable();
-        remove_marks.dedup();
         let mut positioned_leaves = Vec::new();
         for transaction in context.transactions() {
             for (action_index, commitment) in transaction
@@ -851,7 +849,6 @@ impl NamesWalletHost {
             height: context.height(),
             block_start_position,
             leaves: positioned_leaves,
-            remove_marks,
             accepted_commits: accepted_commits.into_iter().collect(),
         })
     }
@@ -877,12 +874,6 @@ fn host_from_stored(
         let missing = stored
             .tracked_names
             .iter()
-            .chain(
-                stored
-                    .registrations
-                    .iter()
-                    .map(|registration| &registration.name),
-            )
             .any(|name| !host.resolvers.contains_key(name));
         if missing {
             return Err("Names checkpoint omits a tracked exact resolver".into());
@@ -1049,18 +1040,10 @@ pub(crate) fn store_registration(
         }) {
             return Err("this account already manages that name".into());
         }
-        if !stored
-            .tracked_names
-            .iter()
-            .any(|name| name == &registration.name)
-        {
-            stored.tracked_names.push(registration.name.clone());
-            stored.tracked_names.sort();
-            stored.tracked_names.dedup();
-            // The checkpoint cannot pretend to resolve a newly tracked name.
-            stored.checkpoint = None;
-            stored.checkpoint_tag = None;
-        }
+        // A draft does not make the existing authenticated cache lie: the
+        // resolver set it actually contains remains unchanged. The next
+        // custody-sensitive sync detects the newly required registration
+        // name and rebuilds before it scans any possible state-note output.
         stored.registrations.push(registration);
         Ok(())
     })
@@ -1215,7 +1198,7 @@ pub(crate) fn managed_registrations(
     db_path: &str,
     network: WalletNetwork,
     account_uuid: &str,
-) -> Result<Vec<StoredRegistration>, String> {
+) -> Result<Vec<ManagedRegistration>, String> {
     let stored = read_stored(&sidecar_path(db_path))?
         .ok_or_else(|| "Names is not configured".to_string())?;
     let resolutions = host_from_stored(network, &stored)?
@@ -1231,13 +1214,17 @@ pub(crate) fn managed_registrations(
         .into_iter()
         .filter(|registration| registration.account_uuid == account_uuid)
         .map(|mut registration| {
-            if let Some(resolution) = resolutions.get(&registration.name) {
-                registration.phase = lifecycle_label(resolution.lifecycle).into();
+            let resolution = resolutions.get(&registration.name).cloned();
+            if let Some(resolution) = &resolution {
                 if let Some(head) = &resolution.head {
+                    registration.phase = lifecycle_label(resolution.lifecycle).into();
                     registration.ua = head.ua.as_str().to_owned();
                 }
             }
-            registration
+            ManagedRegistration {
+                workflow: registration,
+                resolution,
+            }
         })
         .collect())
 }
@@ -1322,10 +1309,22 @@ pub(crate) fn invalidate_after_reorg(
     host: &mut Option<NamesWalletHost>,
     _rewind_height: u32,
 ) {
-    *host = None;
+    // A stale sync session must not erase a newer checkpoint concurrently
+    // created by bootstrap, exact lookup, or another sync session. Clear only
+    // the exact authenticated cache entry this session loaded.
+    let Some(previous) = host.take() else {
+        return;
+    };
+    let Ok(checkpoint) = previous.save_checkpoint() else {
+        return;
+    };
+    let tracked_names = previous.resolvers.keys().cloned().collect::<Vec<_>>();
+    let previous_tag = checkpoint_cache_tag(&previous.config, &tracked_names, &checkpoint);
     let _ = update_stored(db_path, |stored| {
-        stored.checkpoint = None;
-        stored.checkpoint_tag = None;
+        if stored.checkpoint_tag.as_ref() == Some(&previous_tag) {
+            stored.checkpoint = None;
+            stored.checkpoint_tag = None;
+        }
         Ok(())
     });
 }
@@ -1352,6 +1351,21 @@ pub(crate) async fn ensure_for_managed_scan(
     let mut candidate = host
         .take()
         .or_else(|| host_from_stored(network, &stored).ok().flatten());
+    let candidate_missing_required_name = candidate.as_ref().is_some_and(|candidate| {
+        stored
+            .tracked_names
+            .iter()
+            .chain(
+                stored
+                    .registrations
+                    .iter()
+                    .map(|registration| &registration.name),
+            )
+            .any(|name| !candidate.resolvers.contains_key(name))
+    });
+    if candidate_missing_required_name {
+        candidate = None;
+    }
     if candidate
         .as_ref()
         .is_some_and(|candidate| candidate.tip_height() > target_height)
@@ -1799,6 +1813,17 @@ mod tests {
     }
 
     #[test]
+    fn compiled_regtest_deployment_uses_accelerated_timing() {
+        let parameters = config().parameters(WalletNetwork::Regtest).unwrap();
+        assert_eq!(parameters.epoch_blocks, 32);
+        assert_eq!(parameters.window_blocks, 4);
+        assert_eq!(parameters.commit_maturity_blocks, 4);
+        assert_eq!(parameters.commit_ttl_blocks, 24);
+        assert_eq!(parameters.lease_blocks, 128);
+        assert_eq!(parameters.cooldown_blocks, 32);
+    }
+
+    #[test]
     fn empty_multi_name_checkpoint_round_trips_at_one_branch() {
         let host = NamesWalletHost::from_checkpoint(
             WalletNetwork::Regtest,
@@ -1890,6 +1915,43 @@ mod tests {
     }
 
     #[test]
+    fn stale_sync_cannot_invalidate_a_newer_authenticated_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("wallet.db");
+        let db_path = db_path.to_str().unwrap();
+        configure(db_path, WalletNetwork::Regtest, 64).unwrap();
+        let activation = CoreReplayActivationCheckpoint {
+            height: 1,
+            block_hash: [7; 32],
+            ironwood_frontier: IronwoodFrontier::empty(),
+            ironwood_tree_size: 0,
+        };
+        let stale = NamesWalletHost::from_checkpoint(
+            WalletNetwork::Regtest,
+            config(),
+            activation.clone(),
+            ["alice".to_string()],
+        )
+        .unwrap();
+        persist_for_sync(db_path, &stale).unwrap();
+        let newer = NamesWalletHost::from_checkpoint(
+            WalletNetwork::Regtest,
+            config(),
+            activation,
+            ["alice".to_string(), "bob".to_string()],
+        )
+        .unwrap();
+        persist_for_sync(db_path, &newer).unwrap();
+
+        invalidate_after_reorg(db_path, &mut Some(stale), 1);
+
+        let restored = load_for_sync(db_path, WalletNetwork::Regtest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.managed_resolutions().len(), 2);
+    }
+
+    #[test]
     fn sidecar_checkpoint_preserves_newer_workflow_metadata() {
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("wallet.db");
@@ -1917,6 +1979,7 @@ mod tests {
                 ua: "uregtest1invalid-for-storage-only".into(),
                 commitment: [2; 32],
                 target_epoch: 1,
+                target_reveal_height: 20,
                 send_flow_id: None,
                 bond_txid: None,
                 bond_output_index: None,
@@ -1932,6 +1995,12 @@ mod tests {
         persist_for_sync(db_path, &host).unwrap();
         assert_eq!(registrations(db_path).unwrap()[0].phase, "awaiting_bond");
         assert_eq!(
+            managed_registrations(db_path, WalletNetwork::Regtest, "account").unwrap()[0]
+                .workflow
+                .phase,
+            "awaiting_bond"
+        );
+        assert_eq!(
             load_for_sync(db_path, WalletNetwork::Regtest)
                 .unwrap()
                 .unwrap()
@@ -1946,6 +2015,7 @@ mod tests {
                 ua: "uregtest1invalid-for-storage-only".into(),
                 commitment: [3; 32],
                 target_epoch: 1,
+                target_reveal_height: 20,
                 send_flow_id: None,
                 bond_txid: None,
                 bond_output_index: None,
@@ -1957,9 +2027,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(load_for_sync(db_path, WalletNetwork::Regtest)
+        let still_authenticated = load_for_sync(db_path, WalletNetwork::Regtest)
             .unwrap()
-            .is_none());
+            .unwrap();
+        assert_eq!(still_authenticated.managed_resolutions().len(), 1);
     }
 
     /// Opt-in smoke for the real local Zakura/Zaino deployment. Lifecycle

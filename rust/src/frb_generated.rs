@@ -8416,10 +8416,18 @@ impl SseDecode for crate::api::names::ApiManagedName {
         let mut var_commitHeight = <Option<u64>>::sse_decode(deserializer);
         let mut var_commitExpiryHeight = <Option<u64>>::sse_decode(deserializer);
         let mut var_commitBlocksRemaining = <Option<u64>>::sse_decode(deserializer);
+        let mut var_commitWindowStart = <u64>::sse_decode(deserializer);
+        let mut var_commitWindowEnd = <u64>::sse_decode(deserializer);
+        let mut var_commitBlocksUntil = <u64>::sse_decode(deserializer);
+        let mut var_commitWindowOpen = <bool>::sse_decode(deserializer);
         let mut var_revealWindowStart = <u64>::sse_decode(deserializer);
         let mut var_revealWindowEnd = <u64>::sse_decode(deserializer);
         let mut var_revealBlocksUntil = <u64>::sse_decode(deserializer);
         let mut var_revealWindowOpen = <bool>::sse_decode(deserializer);
+        let mut var_refreshWindowStart = <Option<u64>>::sse_decode(deserializer);
+        let mut var_refreshWindowEnd = <Option<u64>>::sse_decode(deserializer);
+        let mut var_refreshBlocksUntil = <Option<u64>>::sse_decode(deserializer);
+        let mut var_refreshWindowOpen = <bool>::sse_decode(deserializer);
         return crate::api::names::ApiManagedName {
             name: var_name,
             payment_address: var_paymentAddress,
@@ -8428,10 +8436,18 @@ impl SseDecode for crate::api::names::ApiManagedName {
             commit_height: var_commitHeight,
             commit_expiry_height: var_commitExpiryHeight,
             commit_blocks_remaining: var_commitBlocksRemaining,
+            commit_window_start: var_commitWindowStart,
+            commit_window_end: var_commitWindowEnd,
+            commit_blocks_until: var_commitBlocksUntil,
+            commit_window_open: var_commitWindowOpen,
             reveal_window_start: var_revealWindowStart,
             reveal_window_end: var_revealWindowEnd,
             reveal_blocks_until: var_revealBlocksUntil,
             reveal_window_open: var_revealWindowOpen,
+            refresh_window_start: var_refreshWindowStart,
+            refresh_window_end: var_refreshWindowEnd,
+            refresh_blocks_until: var_refreshBlocksUntil,
+            refresh_window_open: var_refreshWindowOpen,
         };
     }
 }
@@ -12081,10 +12097,18 @@ impl flutter_rust_bridge::IntoDart for crate::api::names::ApiManagedName {
             self.commit_height.into_into_dart().into_dart(),
             self.commit_expiry_height.into_into_dart().into_dart(),
             self.commit_blocks_remaining.into_into_dart().into_dart(),
+            self.commit_window_start.into_into_dart().into_dart(),
+            self.commit_window_end.into_into_dart().into_dart(),
+            self.commit_blocks_until.into_into_dart().into_dart(),
+            self.commit_window_open.into_into_dart().into_dart(),
             self.reveal_window_start.into_into_dart().into_dart(),
             self.reveal_window_end.into_into_dart().into_dart(),
             self.reveal_blocks_until.into_into_dart().into_dart(),
             self.reveal_window_open.into_into_dart().into_dart(),
+            self.refresh_window_start.into_into_dart().into_dart(),
+            self.refresh_window_end.into_into_dart().into_dart(),
+            self.refresh_blocks_until.into_into_dart().into_dart(),
+            self.refresh_window_open.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -15136,10 +15160,18 @@ impl SseEncode for crate::api::names::ApiManagedName {
         <Option<u64>>::sse_encode(self.commit_height, serializer);
         <Option<u64>>::sse_encode(self.commit_expiry_height, serializer);
         <Option<u64>>::sse_encode(self.commit_blocks_remaining, serializer);
+        <u64>::sse_encode(self.commit_window_start, serializer);
+        <u64>::sse_encode(self.commit_window_end, serializer);
+        <u64>::sse_encode(self.commit_blocks_until, serializer);
+        <bool>::sse_encode(self.commit_window_open, serializer);
         <u64>::sse_encode(self.reveal_window_start, serializer);
         <u64>::sse_encode(self.reveal_window_end, serializer);
         <u64>::sse_encode(self.reveal_blocks_until, serializer);
         <bool>::sse_encode(self.reveal_window_open, serializer);
+        <Option<u64>>::sse_encode(self.refresh_window_start, serializer);
+        <Option<u64>>::sse_encode(self.refresh_window_end, serializer);
+        <Option<u64>>::sse_encode(self.refresh_blocks_until, serializer);
+        <bool>::sse_encode(self.refresh_window_open, serializer);
     }
 }
 

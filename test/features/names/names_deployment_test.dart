@@ -23,10 +23,16 @@ void main() {
   });
 
   test(
-    'the regtest profile contains only deployment identity and replay policy',
+    'the regtest profile contains its accelerated identity and replay policy',
     () {
       const profile = kLocalRegtestNamesDeploymentProfile;
       expect(profile.activationHeight, 2);
+      expect(profile.epochBlocks, 32);
+      expect(profile.windowBlocks, 4);
+      expect(profile.commitMaturityBlocks, 4);
+      expect(profile.commitTtlBlocks, 24);
+      expect(profile.leaseBlocks, 128);
+      expect(profile.cooldownBlocks, 32);
       expect(profile.retentionBlocks, 128);
       expect(profile.networkDomain, 'coppice-runtime-regtest-v1');
       expect(profile.rendezvousIvkHex.length, 128);
@@ -34,13 +40,7 @@ void main() {
     },
   );
 
-  test('replacement protocol constants match the Rust deployment rules', () {
-    expect(kNamesEpochBlocks, 1152);
-    expect(kNamesWindowBlocks, 24);
-    expect(kNamesCommitMaturityBlocks, 24);
-    expect(kNamesCommitTtlBlocks, 192);
-    expect(kNamesLeaseBlocks, 250000);
-    expect(kNamesCooldownBlocks, 1152);
+  test('replacement protocol keeps the exact one-ZEC bond', () {
     expect(kNamesBondZatoshis, 100000000);
   });
 }

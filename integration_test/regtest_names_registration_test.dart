@@ -7,8 +7,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:zcash_wallet/app.dart';
 import 'package:zcash_wallet/src/core/config/network_config.dart';
+import 'package:zcash_wallet/src/core/storage/wallet_paths.dart';
 import 'package:zcash_wallet/src/features/names/providers/names_provider.dart';
 import 'package:zcash_wallet/src/providers/sync_provider.dart';
+import 'package:zcash_wallet/src/rust/api/names.dart' as rust_names;
 
 import 'support/desktop_onboarding_flow.dart';
 import 'support/desktop_regtest_flow.dart';
@@ -26,10 +28,7 @@ void main() {
   testWidgets(
     'registers a name through the desktop UI with manual REVEAL',
     (tester) async {
-      final names = List<String>.generate(
-        4,
-        (index) => 'walletgui${DateTime.now().millisecondsSinceEpoch}$index',
-      );
+      final name = 'walletgui${DateTime.now().millisecondsSinceEpoch}';
       if (kZcashDefaultNetworkName != ZcashNetwork.regtest.name) {
         fail('This test must run with ZCASH_DEFAULT_NETWORK=regtest.');
       }
@@ -73,108 +72,222 @@ void main() {
         description: 'desktop wallet home',
         timeout: const Duration(minutes: 2),
       );
+      await _waitForCurrentSyncToHeight(
+        tester,
+        (await _rpc('getblockcount', const [])) as int,
+      );
       await tapAppWidget(tester, const ValueKey('sidebar_names_button'));
       await _ensureNamesReady(tester);
 
-      for (var index = 0; index < names.length; index++) {
-        final name = names[index];
-        await enterAppText(
-          tester,
-          const ValueKey('names_registration_name_field'),
-          name,
+      await enterAppText(
+        tester,
+        const ValueKey('names_registration_name_field'),
+        name,
+      );
+      await pumpUntil(tester, () {
+        final field = find.descendant(
+          of: find.byKey(const ValueKey('names_registration_address_field')),
+          matching: find.byType(EditableText),
         );
-        await pumpUntil(tester, () {
-          final field = find.descendant(
-            of: find.byKey(const ValueKey('names_registration_address_field')),
-            matching: find.byType(EditableText),
-          );
-          return tester.any(field) &&
-              tester.widget<EditableText>(field).controller.text.isNotEmpty;
-        }, description: 'prefilled registration payment address');
+        return tester.any(field) &&
+            tester.widget<EditableText>(field).controller.text.isNotEmpty;
+      }, description: 'prefilled registration payment address');
 
-        const registrationButton = ValueKey('names_registration_button');
-        await pumpUntil(
-          tester,
-          () => textForKey(tester, registrationButton) != null,
-          description: 'registration action for $name',
-        );
-        await tapAppButton(tester, registrationButton);
-        final preparedBond = await _confirmSend(
-          tester,
-          description: 'Names registration first transaction',
-        );
-        if (preparedBond) {
-          final bondHeight = await _mine(3);
-          await _syncToHeight(tester, bondHeight);
-          await tapAppWidget(tester, const ValueKey('sidebar_names_button'));
-          await pumpUntil(
-            tester,
-            () => find.text('Continue registration').evaluate().isNotEmpty,
-            description: 'confirmed exact bond to become reserved',
-            timeout: const Duration(minutes: 3),
-          );
-          await tapAppButton(
-            tester,
-            ValueKey('names_resume_registration_$name'),
-          );
-          await _confirmSend(tester, description: 'Names COMMIT for $name');
-        }
-
-        // Mine one block at a time and make the wallet finish applying that
-        // exact tip before checking the one-block REVEAL window.
-        for (var block = 0; block < 20; block++) {
-          final minedHeight = await _mine(1);
-          await _syncToHeight(tester, minedHeight);
-          if (block == 0) {
-            await tapAppWidget(tester, const ValueKey('sidebar_names_button'));
-          }
-          if (find.text('Reveal now').evaluate().isNotEmpty) break;
-        }
-        await pumpUntil(
-          tester,
-          () => find.text('Reveal now').evaluate().isNotEmpty,
-          description: 'manual REVEAL action for $name',
-          timeout: const Duration(minutes: 1),
-        );
-        await tapAppButton(tester, ValueKey('names_reveal_button_$name'));
-        await _confirmSend(tester, description: 'Names REVEAL for $name');
-
-        final revealHeight = await _mine(1);
-        await _syncToHeight(tester, revealHeight);
+      const registrationButton = ValueKey('names_registration_button');
+      await pumpUntil(
+        tester,
+        () => textForKey(tester, registrationButton) != null,
+        description: 'registration action for $name',
+      );
+      await tapAppButton(tester, registrationButton);
+      await pumpUntil(
+        tester,
+        () =>
+            tester.any(find.byKey(const ValueKey('send_review_button'))) ||
+            tester.any(find.byKey(const ValueKey('send_confirm_button'))) ||
+            tester.any(find.byKey(ValueKey('managed_name_row_$name'))),
+        description: 'saved Names registration draft',
+      );
+      var commitBroadcast = false;
+      if (tester.any(find.byKey(const ValueKey('send_review_button')))) {
+        await _confirmSend(tester, description: 'Names bond preparation');
+        final bondHeight = await _mine(3);
+        await _syncToHeight(tester, bondHeight);
         await tapAppWidget(tester, const ValueKey('sidebar_names_button'));
-        final currentRow = find.byKey(ValueKey('managed_name_row_$name'));
+      } else if (tester.any(
+        find.byKey(const ValueKey('send_confirm_button')),
+      )) {
+        await _confirmSend(tester, description: 'Names COMMIT for $name');
+        commitBroadcast = true;
+      }
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(WidgetsApp).first),
+      );
+      if (!commitBroadcast) {
+        await container.read(managedNamesProvider.notifier).refresh();
+        final draft = container
+            .read(managedNamesProvider)
+            .requireValue
+            .singleWhere((item) => item.name == name);
+        await _mineToPredecessor(draft.commitWindowStart.toInt());
+        await _syncToHeight(
+          tester,
+          (await _rpc('getblockcount', const [])) as int,
+        );
+        await tapAppWidget(tester, const ValueKey('sidebar_names_button'));
         await pumpUntil(
           tester,
-          () =>
-              tester.any(currentRow) &&
-              tester.any(
-                find.descendant(of: currentRow, matching: find.text('Active')),
-              ),
-          description: '$name to become active',
-          timeout: const Duration(minutes: 3),
+          () => tester.any(
+            find.byKey(ValueKey('names_resume_registration_$name')),
+          ),
+          description: 'managed registration row for $name',
         );
-        for (final earlierName in names.take(index)) {
-          final row = find.byKey(ValueKey('managed_name_row_$earlierName'));
-          expect(row, findsOneWidget);
-          // The intentionally short 32-block regtest lease can naturally
-          // expire an early name while later name-derived anchors are mined.
-          // What must never happen is spending its managed state note through
-          // ordinary wallet note selection.
-          expect(
-            find.descendant(
-              of: row,
-              matching: find.text('State note spent outside Names'),
-            ),
-            findsNothing,
-          );
-        }
+        await tapAppButton(tester, ValueKey('names_resume_registration_$name'));
+        await _confirmSend(tester, description: 'Names COMMIT for $name');
       }
+
+      final commitHeight = await _mine(1);
+      await _syncToHeight(tester, commitHeight);
+      await container.read(managedNamesProvider.notifier).refresh();
+      var managed = container
+          .read(managedNamesProvider)
+          .requireValue
+          .singleWhere((item) => item.name == name);
+      await _mineToPredecessor(managed.revealWindowStart.toInt());
+      await _syncToHeight(
+        tester,
+        (await _rpc('getblockcount', const [])) as int,
+      );
+      await tapAppWidget(tester, const ValueKey('sidebar_names_button'));
+      await container.read(managedNamesProvider.notifier).refresh();
+      managed = container
+          .read(managedNamesProvider)
+          .requireValue
+          .singleWhere((item) => item.name == name);
+      expect(managed.phase, 'commit_accepted');
+      expect(managed.revealWindowOpen, isTrue);
+      await pumpUntil(
+        tester,
+        () => tester.any(find.byKey(ValueKey('names_reveal_button_$name'))),
+        description: 'visible REVEAL action for $name',
+      );
+      await tapAppButton(tester, ValueKey('names_reveal_button_$name'));
+      await _confirmSend(tester, description: 'Names REVEAL for $name');
+
+      final revealHeight = await _mine(1);
+      await _syncToHeight(tester, revealHeight);
+      await tapAppWidget(tester, const ValueKey('sidebar_names_button'));
+      final currentRow = find.byKey(ValueKey('managed_name_row_$name'));
+      await pumpUntil(
+        tester,
+        () =>
+            tester.any(currentRow) &&
+            tester.any(
+              find.descendant(of: currentRow, matching: find.text('Active')),
+            ),
+        description: '$name to become active',
+        timeout: const Duration(minutes: 3),
+      );
 
       // The send flow accepts the registered name as the recipient and pays
       // the resolved payment address.
-      await _sendToName(tester, '${names.last}.zec');
+      await _sendToName(tester, '$name.zec');
+
+      final beforeRefresh = await _resolveRaw(name);
+      expect(beforeRefresh.status, 'active');
+      expect(beforeRefresh.producerTxid, isNotNull);
+
+      await container.read(managedNamesProvider.notifier).refresh();
+      managed = container
+          .read(managedNamesProvider)
+          .requireValue
+          .singleWhere((item) => item.name == name);
+      final refreshStart = managed.refreshWindowStart;
+      expect(refreshStart, isNotNull);
+      // Force the derived checkpoint to be unavailable before catch-up. The
+      // next owned-name sync must reconstruct before scanning rather than
+      // trusting the sidecar or pruning the managed bond.
+      await _invalidateNamesCheckpoint();
+      await _mineToPredecessor(refreshStart!.toInt());
+      await _syncToHeight(
+        tester,
+        (await _rpc('getblockcount', const [])) as int,
+      );
+      await container.read(managedNamesProvider.notifier).refresh();
+      managed = container
+          .read(managedNamesProvider)
+          .requireValue
+          .singleWhere((item) => item.name == name);
+      expect(managed.refreshWindowOpen, isTrue);
+
+      final renewError = await container
+          .read(managedNamesProvider.notifier)
+          .manage(name, 'renew');
+      expect(renewError, isNull);
+      final refreshHeight = await _mine(1);
+      await _syncToHeight(tester, refreshHeight);
+      final afterRefresh = await _resolveRaw(name);
+      expect(afterRefresh.status, 'active');
+      expect(
+        base64.encode(afterRefresh.producerTxid!),
+        isNot(base64.encode(beforeRefresh.producerTxid!)),
+      );
+
+      final releaseError = await container
+          .read(managedNamesProvider.notifier)
+          .manage(name, 'release');
+      expect(releaseError, isNull);
+      final releaseHeight = await _mine(1);
+      await _syncToHeight(tester, releaseHeight);
+      final afterRelease = await _resolveRaw(name);
+      expect(afterRelease.status, 'cooldown');
     },
     timeout: const Timeout(Duration(minutes: 45)),
+  );
+}
+
+Future<void> _mineToPredecessor(int operationWindowStart) async {
+  final current = await _rpc('getblockcount', const []) as int;
+  final count = operationWindowStart - 1 - current;
+  if (count > 0) await _mine(count);
+}
+
+Future<rust_names.ApiNamesResolution> _resolveRaw(String name) async =>
+    rust_names.resolveName(
+      dbPath: await getWalletDbPath(),
+      lightwalletdUrl: 'http://127.0.0.1:9067',
+      network: 'regtest',
+      name: name,
+    );
+
+Future<void> _invalidateNamesCheckpoint() async {
+  final sidecar = File('${await getWalletDbPath()}.coppice-names');
+  final value =
+      jsonDecode(await sidecar.readAsString()) as Map<String, dynamic>;
+  value['checkpoint_tag'] = null;
+  await sidecar.writeAsString(jsonEncode(value), flush: true);
+}
+
+Future<void> _waitForCurrentSyncToHeight(
+  WidgetTester tester,
+  int targetHeight,
+) async {
+  final app = tester.element(find.byType(WidgetsApp).first);
+  final container = ProviderScope.containerOf(app);
+  await pumpUntil(
+    tester,
+    () {
+      final sync = container.read(syncProvider).value;
+      return sync != null &&
+          !sync.isSyncing &&
+          sync.isSyncComplete &&
+          sync.isSyncedToTip &&
+          sync.chainTipHeight >= targetHeight &&
+          sync.scannedHeight >= targetHeight;
+    },
+    description: 'initial wallet synchronization through $targetHeight',
+    timeout: const Duration(minutes: 4),
   );
 }
 

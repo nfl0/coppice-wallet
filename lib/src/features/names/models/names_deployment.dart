@@ -1,23 +1,22 @@
 import '../../../core/config/network_config.dart';
 
-const kNamesEpochBlocks = 1152;
-const kNamesWindowBlocks = 24;
-const kNamesCommitMaturityBlocks = 24;
-const kNamesCommitTtlBlocks = 192;
-const kNamesLeaseBlocks = 250000;
-const kNamesCooldownBlocks = 1152;
 const kNamesBondZatoshis = 100000000;
 
 /// The chain identity and local replay policy for one Coppice/Names deployment.
 ///
-/// Protocol rules such as the daily schedule, one-ZEC bond, lease, cooldown,
-/// and COMMIT validity are fixed by the replacement protocol and are therefore
-/// intentionally absent from this UI-facing configuration.
+/// Schedule fields are fixed identity-bearing values for this compiled
+/// deployment, not user configuration. The one-ZEC bond is protocol-wide.
 class NamesDeploymentProfile {
   const NamesDeploymentProfile({
     required this.label,
     required this.isProduction,
     required this.activationHeight,
+    required this.epochBlocks,
+    required this.windowBlocks,
+    required this.commitMaturityBlocks,
+    required this.commitTtlBlocks,
+    required this.leaseBlocks,
+    required this.cooldownBlocks,
     required this.retentionBlocks,
     required this.networkDomain,
     required this.rendezvousIvkHex,
@@ -30,6 +29,12 @@ class NamesDeploymentProfile {
   /// keep them visually distinct from any future production deployment.
   final bool isProduction;
   final int activationHeight;
+  final int epochBlocks;
+  final int windowBlocks;
+  final int commitMaturityBlocks;
+  final int commitTtlBlocks;
+  final int leaseBlocks;
+  final int cooldownBlocks;
   final int retentionBlocks;
   final String networkDomain;
   final String rendezvousIvkHex;
@@ -46,6 +51,12 @@ const kLocalRegtestNamesDeploymentProfile = NamesDeploymentProfile(
   label: 'Local regtest (qualification)',
   isProduction: false,
   activationHeight: 2,
+  epochBlocks: 32,
+  windowBlocks: 4,
+  commitMaturityBlocks: 4,
+  commitTtlBlocks: 24,
+  leaseBlocks: 128,
+  cooldownBlocks: 32,
   retentionBlocks: 128,
   networkDomain: 'coppice-runtime-regtest-v1',
   rendezvousIvkHex:

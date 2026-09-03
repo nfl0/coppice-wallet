@@ -194,6 +194,7 @@ pub(crate) fn prepare_registration_draft(
             ua: ua.as_str().into(),
             commitment,
             target_epoch,
+            target_reveal_height: reveal_height,
             send_flow_id: None,
             bond_txid: None,
             bond_output_index: None,
@@ -330,17 +331,24 @@ pub(crate) fn begin_registration(
             "the draft's name window was missed; start this unbroadcast registration again".into(),
         );
     }
-    let reveal_height = window
-        .start
-        .max(commit_height.saturating_add(context.parameters.commit_maturity_blocks));
-    if reveal_height >= window.end
-        || !context
-            .parameters
-            .accepts_commit(commit_height, reveal_height)
+    let reveal_height = registration.target_reveal_height;
+    if !window.contains(reveal_height) {
+        return Err("stored REVEAL target is outside its name window".into());
+    }
+    if !context
+        .parameters
+        .accepts_commit(commit_height, reveal_height)
     {
-        return Err(
-            "COMMIT must wait until the next name window is within its validity period".into(),
-        );
+        let commit_window_start =
+            reveal_height.saturating_sub(context.parameters.commit_ttl_blocks.saturating_sub(1));
+        if commit_height < commit_window_start {
+            return Err(format!(
+                "COMMIT window opens at height {commit_window_start}"
+            ));
+        }
+        registration.phase = "commit_window_missed".into();
+        coppice::replace_registration(db_path, registration)?;
+        return Err("the draft's COMMIT window was missed; start again".into());
     }
     let prepared = prepare_commit(
         seed.expose_secret(),

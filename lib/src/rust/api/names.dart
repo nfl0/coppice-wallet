@@ -197,11 +197,24 @@ class ApiManagedName {
   final BigInt? commitExpiryHeight;
   final BigInt? commitBlocksRemaining;
 
+  /// Half-open inclusion-height window in which this draft's COMMIT can
+  /// mature for its already-bound REVEAL height without expiring.
+  final BigInt commitWindowStart;
+  final BigInt commitWindowEnd;
+  final BigInt commitBlocksUntil;
+  final bool commitWindowOpen;
+
   /// The deterministic half-open REVEAL window selected by this workflow.
   final BigInt revealWindowStart;
   final BigInt revealWindowEnd;
   final BigInt revealBlocksUntil;
   final bool revealWindowOpen;
+
+  /// Next deterministic REFRESH window for an active accepted head.
+  final BigInt? refreshWindowStart;
+  final BigInt? refreshWindowEnd;
+  final BigInt? refreshBlocksUntil;
+  final bool refreshWindowOpen;
 
   const ApiManagedName({
     required this.name,
@@ -211,10 +224,18 @@ class ApiManagedName {
     this.commitHeight,
     this.commitExpiryHeight,
     this.commitBlocksRemaining,
+    required this.commitWindowStart,
+    required this.commitWindowEnd,
+    required this.commitBlocksUntil,
+    required this.commitWindowOpen,
     required this.revealWindowStart,
     required this.revealWindowEnd,
     required this.revealBlocksUntil,
     required this.revealWindowOpen,
+    this.refreshWindowStart,
+    this.refreshWindowEnd,
+    this.refreshBlocksUntil,
+    required this.refreshWindowOpen,
   });
 
   @override
@@ -226,10 +247,18 @@ class ApiManagedName {
       commitHeight.hashCode ^
       commitExpiryHeight.hashCode ^
       commitBlocksRemaining.hashCode ^
+      commitWindowStart.hashCode ^
+      commitWindowEnd.hashCode ^
+      commitBlocksUntil.hashCode ^
+      commitWindowOpen.hashCode ^
       revealWindowStart.hashCode ^
       revealWindowEnd.hashCode ^
       revealBlocksUntil.hashCode ^
-      revealWindowOpen.hashCode;
+      revealWindowOpen.hashCode ^
+      refreshWindowStart.hashCode ^
+      refreshWindowEnd.hashCode ^
+      refreshBlocksUntil.hashCode ^
+      refreshWindowOpen.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -243,10 +272,18 @@ class ApiManagedName {
           commitHeight == other.commitHeight &&
           commitExpiryHeight == other.commitExpiryHeight &&
           commitBlocksRemaining == other.commitBlocksRemaining &&
+          commitWindowStart == other.commitWindowStart &&
+          commitWindowEnd == other.commitWindowEnd &&
+          commitBlocksUntil == other.commitBlocksUntil &&
+          commitWindowOpen == other.commitWindowOpen &&
           revealWindowStart == other.revealWindowStart &&
           revealWindowEnd == other.revealWindowEnd &&
           revealBlocksUntil == other.revealBlocksUntil &&
-          revealWindowOpen == other.revealWindowOpen;
+          revealWindowOpen == other.revealWindowOpen &&
+          refreshWindowStart == other.refreshWindowStart &&
+          refreshWindowEnd == other.refreshWindowEnd &&
+          refreshBlocksUntil == other.refreshBlocksUntil &&
+          refreshWindowOpen == other.refreshWindowOpen;
 }
 
 /// Wallet-owned denomination readiness for starting a registration.

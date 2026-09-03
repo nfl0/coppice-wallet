@@ -137,6 +137,8 @@ class _NamesViewState extends ConsumerState<NamesView> {
         paymentAddress: _registrationAddressController.text,
       );
       if (!mounted) return;
+      await notifier.refreshDraftPhase();
+      if (!mounted) return;
       registration = ref.read(namesRegistrationProvider);
     } else {
       await notifier.refreshDraftPhase();
@@ -161,7 +163,10 @@ class _NamesViewState extends ConsumerState<NamesView> {
       );
       return;
     }
-    if (registration.draftPhase != 'bond_reserved') return;
+    if (registration.draftPhase != 'bond_reserved' ||
+        !registration.commitWindowOpen) {
+      return;
+    }
     final review = await notifier.begin(
       name: registration.draftName ?? _registrationNameController.text,
       paymentAddress:
@@ -828,27 +833,27 @@ class _DeploymentParameterGrid extends StatelessWidget {
         ),
         _InfoRow(
           label: 'Daily schedule (blocks)',
-          value: kNamesEpochBlocks.toString(),
+          value: profile.epochBlocks.toString(),
         ),
         _InfoRow(
           label: 'Name window (blocks)',
-          value: kNamesWindowBlocks.toString(),
+          value: profile.windowBlocks.toString(),
         ),
         _InfoRow(
           label: 'Commit maturity (blocks)',
-          value: kNamesCommitMaturityBlocks.toString(),
+          value: profile.commitMaturityBlocks.toString(),
         ),
         _InfoRow(
           label: 'Commit TTL (blocks)',
-          value: kNamesCommitTtlBlocks.toString(),
+          value: profile.commitTtlBlocks.toString(),
         ),
         _InfoRow(
           label: 'Lease duration (blocks)',
-          value: kNamesLeaseBlocks.toString(),
+          value: profile.leaseBlocks.toString(),
         ),
         _InfoRow(
           label: 'Cooldown (blocks)',
-          value: kNamesCooldownBlocks.toString(),
+          value: profile.cooldownBlocks.toString(),
         ),
         _InfoRow(
           label: 'Bond (zatoshis)',
@@ -968,7 +973,10 @@ class _RegistrationCard extends StatelessWidget {
         ] else if (state.draftPhase == 'bond_reserved') ...[
           const SizedBox(height: AppSpacing.xs),
           Text(
-            'The exact bond note is reserved for this name. Continue to review the COMMIT.',
+            state.commitWindowOpen
+                ? 'The exact bond note is reserved. Continue to review the COMMIT.'
+                : 'The exact bond is reserved. The deterministic COMMIT window '
+                      'opens in ${state.commitBlocksUntil ?? BigInt.zero} blocks.',
             style: AppTypography.bodySmall.copyWith(color: colors.text.success),
           ),
         ],
@@ -1140,6 +1148,21 @@ class _ManagedNamesCard extends StatelessWidget {
                                             : colors.text.secondary,
                                       ),
                                     ),
+                                  if (item.phase == 'active' &&
+                                      item.refreshWindowStart != null)
+                                    Text(
+                                      item.refreshWindowOpen
+                                          ? 'REFRESH window is open through height '
+                                                '${item.refreshWindowEnd! - BigInt.one}'
+                                          : 'Next REFRESH window opens at height '
+                                                '${item.refreshWindowStart} '
+                                                '(${item.refreshBlocksUntil} blocks)',
+                                      style: AppTypography.bodySmall.copyWith(
+                                        color: item.refreshWindowOpen
+                                            ? colors.text.success
+                                            : colors.text.secondary,
+                                      ),
+                                    ),
                                 ],
                               ),
                             ),
@@ -1192,16 +1215,18 @@ class _ManagedNamesCard extends StatelessWidget {
                                 enabled: inFlightName == null,
                                 tooltip: 'Manage ${item.name}.zec',
                                 onSelected: (action) => onManage(item, action),
-                                itemBuilder: (context) => const [
+                                itemBuilder: (context) => [
                                   PopupMenuItem(
                                     value: 'update',
-                                    child: Text('Update address'),
+                                    enabled: item.refreshWindowOpen,
+                                    child: const Text('Update address'),
                                   ),
                                   PopupMenuItem(
                                     value: 'renew',
-                                    child: Text('Renew lease'),
+                                    enabled: item.refreshWindowOpen,
+                                    child: const Text('Renew lease'),
                                   ),
-                                  PopupMenuItem(
+                                  const PopupMenuItem(
                                     value: 'release',
                                     child: Text('Release name'),
                                   ),

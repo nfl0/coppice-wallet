@@ -64,11 +64,22 @@ pub struct ApiManagedName {
     pub commit_height: Option<u64>,
     pub commit_expiry_height: Option<u64>,
     pub commit_blocks_remaining: Option<u64>,
+    /// Half-open inclusion-height window in which this draft's COMMIT can
+    /// mature for its already-bound REVEAL height without expiring.
+    pub commit_window_start: u64,
+    pub commit_window_end: u64,
+    pub commit_blocks_until: u64,
+    pub commit_window_open: bool,
     /// The deterministic half-open REVEAL window selected by this workflow.
     pub reveal_window_start: u64,
     pub reveal_window_end: u64,
     pub reveal_blocks_until: u64,
     pub reveal_window_open: bool,
+    /// Next deterministic REFRESH window for an active accepted head.
+    pub refresh_window_start: Option<u64>,
+    pub refresh_window_end: Option<u64>,
+    pub refresh_blocks_until: Option<u64>,
+    pub refresh_window_open: bool,
 }
 
 impl From<coppice::NamesWalletStatus> for ApiNamesWalletStatus {
@@ -168,24 +179,60 @@ pub fn get_managed_names(
     let commit_ttl_blocks = metadata.parameters.commit_ttl_blocks;
     coppice::managed_registrations(&db_path, network, &account_uuid)?
         .into_iter()
-        .map(|registration| {
+        .map(|managed| {
+            let registration = managed.workflow;
             let name = coppice_names::protocol::Name::parse(&registration.name)
                 .map_err(|error| format!("invalid stored Names label: {error:?}"))?;
+            let name_id = name
+                .id()
+                .map_err(|error| format!("derive stored name ID: {error:?}"))?;
             let window = metadata
                 .parameters
-                .window(
-                    name.id()
-                        .map_err(|error| format!("derive stored name ID: {error:?}"))?,
-                    registration.target_epoch,
-                )
+                .window(name_id, registration.target_epoch)
                 .map_err(|error| format!("derive stored Names window: {error:?}"))?;
             let next_height = current_tip.saturating_add(1);
+            let refresh_window = managed
+                .resolution
+                .and_then(|resolution| resolution.head)
+                .map(|head| {
+                    let predecessor_epoch = metadata
+                        .parameters
+                        .epoch(head.producer.height)
+                        .map_err(|error| format!("derive predecessor epoch: {error:?}"))?;
+                    let current_epoch = metadata
+                        .parameters
+                        .epoch(next_height)
+                        .map_err(|error| format!("derive current Names epoch: {error:?}"))?;
+                    let mut epoch = current_epoch.max(predecessor_epoch.saturating_add(1));
+                    let mut window = metadata
+                        .parameters
+                        .window(name_id, epoch)
+                        .map_err(|error| format!("derive REFRESH window: {error:?}"))?;
+                    if next_height >= window.end {
+                        epoch = epoch
+                            .checked_add(1)
+                            .ok_or_else(|| "Names epoch overflow".to_string())?;
+                        window = metadata
+                            .parameters
+                            .window(name_id, epoch)
+                            .map_err(|error| format!("derive next REFRESH window: {error:?}"))?;
+                    }
+                    Ok::<_, String>(window)
+                })
+                .transpose()?;
             let payment_address = Some(registration.ua.clone());
             let commit_expiry_height = registration
                 .commit_height
                 .map(|height| height.saturating_add(commit_ttl_blocks));
             let commit_blocks_remaining =
                 commit_expiry_height.map(|expiry| expiry.saturating_sub(current_tip));
+            let commit_window_start = registration
+                .target_reveal_height
+                .saturating_sub(commit_ttl_blocks.saturating_sub(1));
+            let commit_window_end = registration
+                .target_reveal_height
+                .saturating_sub(metadata.parameters.commit_maturity_blocks)
+                .saturating_add(1);
             Ok(ApiManagedName {
                 name: registration.name,
                 payment_address,
@@ -194,10 +241,21 @@ pub fn get_managed_names(
                 commit_height: registration.commit_height.map(u64::from),
                 commit_expiry_height: commit_expiry_height.map(u64::from),
                 commit_blocks_remaining: commit_blocks_remaining.map(u64::from),
+                commit_window_start: u64::from(commit_window_start),
+                commit_window_end: u64::from(commit_window_end),
+                commit_blocks_until: u64::from(commit_window_start.saturating_sub(next_height)),
+                commit_window_open: commit_window_start <= next_height
+                    && next_height < commit_window_end,
                 reveal_window_start: u64::from(window.start),
                 reveal_window_end: u64::from(window.end),
                 reveal_blocks_until: u64::from(window.start.saturating_sub(next_height)),
                 reveal_window_open: window.contains(next_height),
+                refresh_window_start: refresh_window.map(|window| u64::from(window.start)),
+                refresh_window_end: refresh_window.map(|window| u64::from(window.end)),
+                refresh_blocks_until: refresh_window
+                    .map(|window| u64::from(window.start.saturating_sub(next_height))),
+                refresh_window_open: refresh_window
+                    .is_some_and(|window| window.contains(next_height)),
             })
         })
         .collect()

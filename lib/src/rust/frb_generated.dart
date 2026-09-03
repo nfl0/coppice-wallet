@@ -9893,8 +9893,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ApiManagedName dco_decode_api_managed_name(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 11)
-      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
+    if (arr.length != 19)
+      throw Exception('unexpected arr length: expect 19 but see ${arr.length}');
     return ApiManagedName(
       name: dco_decode_String(arr[0]),
       paymentAddress: dco_decode_opt_String(arr[1]),
@@ -9903,10 +9903,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       commitHeight: dco_decode_opt_box_autoadd_u_64(arr[4]),
       commitExpiryHeight: dco_decode_opt_box_autoadd_u_64(arr[5]),
       commitBlocksRemaining: dco_decode_opt_box_autoadd_u_64(arr[6]),
-      revealWindowStart: dco_decode_u_64(arr[7]),
-      revealWindowEnd: dco_decode_u_64(arr[8]),
-      revealBlocksUntil: dco_decode_u_64(arr[9]),
-      revealWindowOpen: dco_decode_bool(arr[10]),
+      commitWindowStart: dco_decode_u_64(arr[7]),
+      commitWindowEnd: dco_decode_u_64(arr[8]),
+      commitBlocksUntil: dco_decode_u_64(arr[9]),
+      commitWindowOpen: dco_decode_bool(arr[10]),
+      revealWindowStart: dco_decode_u_64(arr[11]),
+      revealWindowEnd: dco_decode_u_64(arr[12]),
+      revealBlocksUntil: dco_decode_u_64(arr[13]),
+      revealWindowOpen: dco_decode_bool(arr[14]),
+      refreshWindowStart: dco_decode_opt_box_autoadd_u_64(arr[15]),
+      refreshWindowEnd: dco_decode_opt_box_autoadd_u_64(arr[16]),
+      refreshBlocksUntil: dco_decode_opt_box_autoadd_u_64(arr[17]),
+      refreshWindowOpen: dco_decode_bool(arr[18]),
     );
   }
 
@@ -12655,10 +12663,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_commitBlocksRemaining = sse_decode_opt_box_autoadd_u_64(
       deserializer,
     );
+    var var_commitWindowStart = sse_decode_u_64(deserializer);
+    var var_commitWindowEnd = sse_decode_u_64(deserializer);
+    var var_commitBlocksUntil = sse_decode_u_64(deserializer);
+    var var_commitWindowOpen = sse_decode_bool(deserializer);
     var var_revealWindowStart = sse_decode_u_64(deserializer);
     var var_revealWindowEnd = sse_decode_u_64(deserializer);
     var var_revealBlocksUntil = sse_decode_u_64(deserializer);
     var var_revealWindowOpen = sse_decode_bool(deserializer);
+    var var_refreshWindowStart = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_refreshWindowEnd = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_refreshBlocksUntil = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_refreshWindowOpen = sse_decode_bool(deserializer);
     return ApiManagedName(
       name: var_name,
       paymentAddress: var_paymentAddress,
@@ -12667,10 +12683,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       commitHeight: var_commitHeight,
       commitExpiryHeight: var_commitExpiryHeight,
       commitBlocksRemaining: var_commitBlocksRemaining,
+      commitWindowStart: var_commitWindowStart,
+      commitWindowEnd: var_commitWindowEnd,
+      commitBlocksUntil: var_commitBlocksUntil,
+      commitWindowOpen: var_commitWindowOpen,
       revealWindowStart: var_revealWindowStart,
       revealWindowEnd: var_revealWindowEnd,
       revealBlocksUntil: var_revealBlocksUntil,
       revealWindowOpen: var_revealWindowOpen,
+      refreshWindowStart: var_refreshWindowStart,
+      refreshWindowEnd: var_refreshWindowEnd,
+      refreshBlocksUntil: var_refreshBlocksUntil,
+      refreshWindowOpen: var_refreshWindowOpen,
     );
   }
 
@@ -16243,10 +16267,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_box_autoadd_u_64(self.commitHeight, serializer);
     sse_encode_opt_box_autoadd_u_64(self.commitExpiryHeight, serializer);
     sse_encode_opt_box_autoadd_u_64(self.commitBlocksRemaining, serializer);
+    sse_encode_u_64(self.commitWindowStart, serializer);
+    sse_encode_u_64(self.commitWindowEnd, serializer);
+    sse_encode_u_64(self.commitBlocksUntil, serializer);
+    sse_encode_bool(self.commitWindowOpen, serializer);
     sse_encode_u_64(self.revealWindowStart, serializer);
     sse_encode_u_64(self.revealWindowEnd, serializer);
     sse_encode_u_64(self.revealBlocksUntil, serializer);
     sse_encode_bool(self.revealWindowOpen, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.refreshWindowStart, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.refreshWindowEnd, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.refreshBlocksUntil, serializer);
+    sse_encode_bool(self.refreshWindowOpen, serializer);
   }
 
   @protected
