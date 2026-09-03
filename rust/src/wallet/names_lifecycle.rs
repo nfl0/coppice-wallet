@@ -205,7 +205,38 @@ pub(crate) fn prepare_registration_draft(
             reveal_txid: None,
         },
     )?;
-    reserve_pending_bonds(db_path, network)
+    reserve_pending_bonds(db_path, network)?;
+
+    // If an exact bond was already spendable, keep the earliest valid target.
+    // Otherwise the ordinary self-transfer must first satisfy the wallet's
+    // trusted-change confirmation policy. Retarget now, while no COMMIT has
+    // been published and the mnemonic-derived authority is available, so the
+    // bond cannot become spendable only after its COMMIT window has closed.
+    let mut registration = coppice::registration(db_path, account_uuid, name.as_str())?
+        .ok_or_else(|| "Names registration draft disappeared".to_string())?;
+    if registration.phase == "awaiting_bond" {
+        let delayed_commit_height = next_height
+            .checked_add(u32::from(super::confirmations_policy().trusted()))
+            .ok_or_else(|| "Names bond confirmation height overflow".to_string())?;
+        let (target_epoch, reveal_height) =
+            target_reveal(context.parameters, &name, delayed_commit_height)?;
+        let prepared = prepare_commit(
+            seed.expose_secret(),
+            context.deployment,
+            &name,
+            reveal_height,
+        )
+        .map_err(|error| format!("retarget Names COMMIT after bond preparation: {error:#}"))?;
+        let commitment = match prepared.publication().operation() {
+            coppice_names::codec::Operation::Commit { commitment } => commitment.to_bytes(),
+            _ => return Err("prepared Names operation is not COMMIT".into()),
+        };
+        registration.target_epoch = target_epoch;
+        registration.target_reveal_height = reveal_height;
+        registration.commitment = commitment;
+        coppice::replace_registration(db_path, registration)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn reserve_pending_bonds(db_path: &str, network: WalletNetwork) -> Result<(), String> {
@@ -761,30 +792,31 @@ pub(crate) fn build_reveal(
     })
 }
 
-fn store_reviewed_reveal_capability(
+fn store_reviewed_names_capability(
     transaction: NamesTransaction,
     send_flow_id: &str,
+    kind: sync::NamesTransactionKind,
 ) -> Result<u64, String> {
     let reservation = Arc::new(Mutex::new(transaction.fee_reservation));
     let release_reservation = Arc::clone(&reservation);
     let release = Arc::new(move || {
         let mut reservation = release_reservation
             .lock()
-            .map_err(|error| format!("lock Names REVEAL fee reservation: {error}"))?;
+            .map_err(|error| format!("lock Names fee reservation: {error}"))?;
         let _ = reservation.take();
         Ok(())
     });
     let retain_reservation = reservation;
-    let retain = Arc::new(move |_lock: sync::NamesRevealLockMetadata| {
+    let retain = Arc::new(move |_lock: sync::NamesTransactionLockMetadata| {
         let mut reservation = retain_reservation
             .lock()
-            .map_err(|error| format!("lock Names REVEAL fee reservation: {error}"))?;
+            .map_err(|error| format!("lock Names fee reservation: {error}"))?;
         if let Some(reservation) = reservation.as_mut() {
             reservation.disarm();
         }
         Ok(())
     });
-    let execution = sync::NamesRevealExecution {
+    let execution = sync::NamesTransactionExecution {
         raw: transaction.raw,
         txid: transaction.txid,
         db_path: transaction.db_path,
@@ -794,14 +826,15 @@ fn store_reviewed_reveal_capability(
         valid_from_height: transaction.valid_from_height,
         expiry_height: transaction.expiry_height,
         fee_zatoshi: transaction.fee_zatoshi,
+        kind,
     };
-    sync::allocate_names_reveal_capability(
+    sync::allocate_names_transaction_capability(
         send_flow_id,
         execution,
-        sync::NamesRevealLockMetadata {
+        sync::NamesTransactionLockMetadata {
             expiry_height: u64::from(transaction.expiry_height),
         },
-        sync::NamesRevealCleanup::Callbacks { release, retain },
+        sync::NamesTransactionCleanup::Callbacks { release, retain },
     )
 }
 
@@ -824,7 +857,11 @@ pub(crate) async fn begin_reviewed_reveal(
     )
     .await?;
     let fee_zatoshi = transaction.fee_zatoshi;
-    let proposal_id = store_reviewed_reveal_capability(transaction, send_flow_id)?;
+    let proposal_id = store_reviewed_names_capability(
+        transaction,
+        send_flow_id,
+        sync::NamesTransactionKind::Reveal,
+    )?;
     Ok(NamesRevealProposal {
         proposal_id,
         fee_zatoshi,
@@ -1232,7 +1269,7 @@ fn build_release(
     let context = coppice::lifecycle_context(db_path, network)?;
     let resolution = coppice::accepted_managed_resolution(db_path, network, name.as_str())?
         .ok_or_else(|| "the name is not tracked by this wallet".to_string())?;
-    let _predecessor = resolution
+    let predecessor = resolution
         .head
         .ok_or_else(|| "the name has no accepted canonical head".to_string())?;
     let origin = resolution
@@ -1255,6 +1292,20 @@ fn build_release(
         &name,
         origin,
     )?;
+    let recovered_commitment = FieldElement::from_bytes(
+        orchard::note::ExtractedNoteCommitment::from(bond_note.commitment()).to_bytes(),
+    )
+    .map_err(|error| format!("derive recovered RELEASE commitment: {error:?}"))?;
+    let recovered_nullifier =
+        FieldElement::from_bytes(bond_note.nullifier(&name_fvk).to_bytes())
+            .map_err(|error| format!("derive recovered RELEASE nullifier: {error:?}"))?;
+    if recovered_commitment != predecessor.commitment
+        || recovered_nullifier != predecessor.future_nf
+    {
+        return Err(
+            "recovered RELEASE bond does not match the accepted canonical Names head".into(),
+        );
+    }
 
     let account_id = parse_account_uuid(account_uuid)?;
     let mut db = open_wallet_db(db_path, network)?;
@@ -1386,7 +1437,69 @@ pub(crate) async fn execute_transition(
         reservation.disarm();
     }
     sync::decrypt_and_store_transaction(db_path, network, &transaction.raw, None)?;
+    let action = match kind {
+        NamesTransitionKind::Update(_) => "update",
+        NamesTransitionKind::Renew => "renew",
+        NamesTransitionKind::Release => "release",
+    };
+    coppice::record_names_activity(
+        db_path,
+        account_uuid,
+        &transaction.name,
+        action,
+        transaction.txid,
+    )?;
     Ok(transaction.txid)
+}
+
+/// Builds a current-head transition and places it behind the same consume-once
+/// review capability used by REVEAL. Nothing is broadcast until the shared
+/// send-status flow executes this proposal.
+pub(crate) async fn begin_reviewed_transition(
+    db_path: &str,
+    lightwalletd_url: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+    name: &str,
+    send_flow_id: &str,
+    kind: NamesTransitionKind,
+    seed: SecretVec<u8>,
+) -> Result<NamesRevealProposal, String> {
+    let context = coppice::lifecycle_context(db_path, network)?;
+    ensure_live_tip(lightwalletd_url, context.tip_height).await?;
+    let (transaction, capability_kind) = match &kind {
+        NamesTransitionKind::Update(address) => (
+            build_refresh(
+                db_path,
+                network,
+                account_uuid,
+                name,
+                Some(address.as_str()),
+                seed,
+            )?,
+            sync::NamesTransactionKind::Update,
+        ),
+        NamesTransitionKind::Renew => (
+            build_refresh(db_path, network, account_uuid, name, None, seed)?,
+            sync::NamesTransactionKind::Renew,
+        ),
+        NamesTransitionKind::Release => (
+            build_release(db_path, network, account_uuid, name, seed)?,
+            sync::NamesTransactionKind::Release,
+        ),
+    };
+    ensure_transaction_window_open(
+        lightwalletd_url,
+        transaction.valid_from_height,
+        transaction.expiry_height,
+    )
+    .await?;
+    let fee_zatoshi = transaction.fee_zatoshi;
+    let proposal_id = store_reviewed_names_capability(transaction, send_flow_id, capability_kind)?;
+    Ok(NamesRevealProposal {
+        proposal_id,
+        fee_zatoshi,
+    })
 }
 
 #[cfg(test)]
@@ -1412,5 +1525,23 @@ mod tests {
             assert!(window.contains(reveal));
             assert!(reveal >= next_height + parameters.commit_maturity_blocks);
         }
+    }
+
+    #[test]
+    fn draft_schedule_can_include_the_trusted_change_confirmation_margin() {
+        let parameters = coppice_names::schedule::Parameters::regtest([9; 32], 2);
+        let name = Name::parse("alice").unwrap();
+        let margin = u32::from(super::super::confirmations_policy().trusted());
+        let (next_height, original_reveal) = (2..256)
+            .find_map(|next_height| {
+                let (_, reveal) = target_reveal(parameters, &name, next_height).unwrap();
+                (!parameters.accepts_commit(next_height + margin, reveal))
+                    .then_some((next_height, reveal))
+            })
+            .expect("the short Regtest windows expose a confirmation edge");
+
+        let (_, delayed_reveal) = target_reveal(parameters, &name, next_height + margin).unwrap();
+        assert_ne!(delayed_reveal, original_reveal);
+        assert!(parameters.accepts_commit(next_height + margin, delayed_reveal));
     }
 }

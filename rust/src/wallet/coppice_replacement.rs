@@ -98,6 +98,26 @@ struct StoredNamesWallet {
     registrations: Vec<StoredRegistration>,
     #[serde(default)]
     tracked_names: Vec<String>,
+    /// Non-authoritative, nonsecret labels for transactions created by this
+    /// wallet. Resolution never consults these records; Activity uses them to
+    /// avoid presenting Names state transitions as ordinary receives.
+    #[serde(default)]
+    activities: Vec<StoredNamesActivity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredNamesActivity {
+    account_uuid: String,
+    name: String,
+    action: String,
+    txid: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NamesActivity {
+    pub name: String,
+    pub action: String,
+    pub txid: [u8; 32],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -908,6 +928,7 @@ pub(crate) fn configure(
                 checkpoint_tag: None,
                 registrations: Vec::new(),
                 tracked_names: Vec::new(),
+                activities: Vec::new(),
             },
         )?;
         Ok(needs_bootstrap_status(&config))
@@ -1107,13 +1128,17 @@ pub(crate) fn record_commit_broadcast(
     txid: [u8; 32],
 ) -> Result<(), String> {
     update_stored(db_path, |stored| {
-        let registration = stored
-            .registrations
-            .iter_mut()
-            .find(|registration| registration.send_flow_id.as_deref() == Some(send_flow_id))
-            .ok_or_else(|| "Names COMMIT workflow is unavailable".to_string())?;
-        registration.commit_txid = Some(txid);
-        registration.phase = "commit_broadcast".into();
+        let (account_uuid, name) = {
+            let registration = stored
+                .registrations
+                .iter_mut()
+                .find(|registration| registration.send_flow_id.as_deref() == Some(send_flow_id))
+                .ok_or_else(|| "Names COMMIT workflow is unavailable".to_string())?;
+            registration.commit_txid = Some(txid);
+            registration.phase = "commit_broadcast".into();
+            (registration.account_uuid.clone(), registration.name.clone())
+        };
+        upsert_activity(stored, &account_uuid, &name, "commit", txid);
         Ok(())
     })
 }
@@ -1125,17 +1150,106 @@ pub(crate) fn record_reveal_broadcast(
     txid: [u8; 32],
 ) -> Result<(), String> {
     update_stored(db_path, |stored| {
-        let registration = stored
-            .registrations
-            .iter_mut()
-            .find(|registration| {
-                registration.account_uuid == account_uuid && registration.name == name
-            })
-            .ok_or_else(|| "Names registration workflow is unavailable".to_string())?;
-        registration.reveal_txid = Some(txid);
-        registration.phase = "reveal_broadcast".into();
+        {
+            let registration = stored
+                .registrations
+                .iter_mut()
+                .find(|registration| {
+                    registration.account_uuid == account_uuid && registration.name == name
+                })
+                .ok_or_else(|| "Names registration workflow is unavailable".to_string())?;
+            registration.reveal_txid = Some(txid);
+            registration.phase = "reveal_broadcast".into();
+        }
+        upsert_activity(stored, account_uuid, name, "reveal", txid);
         Ok(())
     })
+}
+
+pub(crate) fn record_names_activity(
+    db_path: &str,
+    account_uuid: &str,
+    name: &str,
+    action: &str,
+    txid: [u8; 32],
+) -> Result<(), String> {
+    if !matches!(action, "update" | "renew" | "release") {
+        return Err(format!("unsupported Names activity action {action:?}"));
+    }
+    update_stored(db_path, |stored| {
+        upsert_activity(stored, account_uuid, name, action, txid);
+        Ok(())
+    })
+}
+
+pub(crate) fn names_activities(
+    db_path: &str,
+    account_uuid: &str,
+) -> Result<Vec<NamesActivity>, String> {
+    let Some(stored) = read_stored(&sidecar_path(db_path))? else {
+        return Ok(Vec::new());
+    };
+    Ok(stored
+        .activities
+        .into_iter()
+        .filter(|activity| activity.account_uuid == account_uuid)
+        .map(|activity| NamesActivity {
+            name: activity.name,
+            action: activity.action,
+            txid: activity.txid,
+        })
+        .collect())
+}
+
+/// Names whose authenticated current head still points at an unspent bonded
+/// state note controlled by this account. This is holdings metadata, not
+/// spendable wallet balance and not resolver authority.
+pub(crate) fn bonded_names(
+    db_path: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+) -> Result<Vec<String>, String> {
+    let Some(stored) = read_stored(&sidecar_path(db_path))? else {
+        return Ok(Vec::new());
+    };
+    let Some(host) = host_from_stored(network, &stored)? else {
+        return Ok(Vec::new());
+    };
+    let bonded = host
+        .managed_resolutions()
+        .into_iter()
+        .filter(|resolution| resolution.marked_position.is_some())
+        .map(|resolution| resolution.name)
+        .collect::<BTreeSet<_>>();
+    Ok(stored
+        .registrations
+        .iter()
+        .filter(|registration| {
+            registration.account_uuid == account_uuid && bonded.contains(&registration.name)
+        })
+        .map(|registration| registration.name.clone())
+        .collect())
+}
+
+fn upsert_activity(
+    stored: &mut StoredNamesWallet,
+    account_uuid: &str,
+    name: &str,
+    action: &str,
+    txid: [u8; 32],
+) {
+    if let Some(existing) = stored.activities.iter_mut().find(|item| item.txid == txid) {
+        existing.account_uuid = account_uuid.to_owned();
+        existing.name = name.to_owned();
+        existing.action = action.to_owned();
+        return;
+    }
+    stored.activities.push(StoredNamesActivity {
+        account_uuid: account_uuid.to_owned(),
+        name: name.to_owned(),
+        action: action.to_owned(),
+        txid,
+    });
 }
 
 pub(crate) fn accepted_commit(
@@ -1495,29 +1609,55 @@ pub(crate) async fn resolve_name(
         u32::try_from(tip.height).map_err(|_| "lightwalletd tip exceeds u32".to_string())?;
 
     let mut scanned = 0u64;
-    let existing_host = host_from_stored(network, &stored)?;
-    let mut host = match existing_host {
-        Some(host) if host.resolvers.contains_key(name.as_str()) => host,
-        existing => {
-            let base_height = stored
-                .config
-                .activation_height
-                .checked_sub(1)
-                .ok_or_else(|| "Names activation has no parent height".to_string())?;
-            if tip_height < base_height {
-                return Err(format!(
-                    "lightwalletd tip {tip_height} precedes Names activation parent {base_height}"
-                ));
-            }
-            let checkpoint = activation_checkpoint(&mut client, base_height).await?;
-            let names = existing
-                .into_iter()
-                .flat_map(|host| host.resolvers.into_keys())
-                .chain(stored.tracked_names.iter().cloned())
-                .chain(std::iter::once(name.as_str().to_owned()))
-                .collect::<BTreeSet<_>>();
-            NamesWalletHost::from_checkpoint(network, stored.config.clone(), checkpoint, names)?
+    let mut existing_host = host_from_stored(network, &stored)?;
+    let existing_is_canonical = if let Some(host) = existing_host.as_ref() {
+        if host.tip_height() > tip_height {
+            false
+        } else {
+            let canonical_hash = if host.tip_height() == tip_height {
+                <[u8; 32]>::try_from(tip.hash.as_slice()).ok()
+            } else {
+                None
+            };
+            let canonical_hash = match canonical_hash {
+                Some(hash) => hash,
+                None => {
+                    sync_engine::get_compact_block_hash(&mut client, u64::from(host.tip_height()))
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .0
+                }
+            };
+            host.core.tip().block_hash == canonical_hash
         }
+    } else {
+        false
+    };
+    let can_reuse = existing_is_canonical
+        && existing_host
+            .as_ref()
+            .is_some_and(|host| host.resolvers.contains_key(name.as_str()));
+    let mut host = if can_reuse {
+        existing_host.take().expect("reusable host is present")
+    } else {
+        let base_height = stored
+            .config
+            .activation_height
+            .checked_sub(1)
+            .ok_or_else(|| "Names activation has no parent height".to_string())?;
+        if tip_height < base_height {
+            return Err(format!(
+                "lightwalletd tip {tip_height} precedes Names activation parent {base_height}"
+            ));
+        }
+        let checkpoint = activation_checkpoint(&mut client, base_height).await?;
+        let names = existing_host
+            .into_iter()
+            .flat_map(|host| host.resolvers.into_keys())
+            .chain(stored.tracked_names.iter().cloned())
+            .chain(std::iter::once(name.as_str().to_owned()))
+            .collect::<BTreeSet<_>>();
+        NamesWalletHost::from_checkpoint(network, stored.config.clone(), checkpoint, names)?
     };
     if host.tip_height() < tip_height {
         let start = host.tip_height().saturating_add(1);
@@ -1912,6 +2052,26 @@ mod tests {
             load_for_sync(db_path, WalletNetwork::Regtest),
             Err(error) if error.contains("deployment identity does not match")
         ));
+    }
+
+    #[test]
+    fn activity_labels_are_nonsecret_account_scoped_sidecar_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("wallet.db");
+        let db_path = db_path.to_str().unwrap();
+        configure(db_path, WalletNetwork::Regtest, 64).unwrap();
+
+        record_names_activity(db_path, "account-a", "alice", "release", [9; 32]).unwrap();
+        record_names_activity(db_path, "account-b", "bob", "renew", [8; 32]).unwrap();
+
+        assert_eq!(
+            names_activities(db_path, "account-a").unwrap(),
+            vec![NamesActivity {
+                name: "alice".into(),
+                action: "release".into(),
+                txid: [9; 32],
+            }]
+        );
     }
 
     #[test]

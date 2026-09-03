@@ -29,7 +29,8 @@ import '../../../address_book/providers/address_book_provider.dart';
 import '../../../send/widgets/send_recipient_resolver.dart';
 import '../../../send/widgets/send_review_layout.dart'
     show SendReviewContactRecipient;
-import '../../activity_row_mapper.dart' show formatActivityTimestamp;
+import '../../activity_row_mapper.dart'
+    show formatActivityTimestamp, isNamesActivityKind, namesActivityTitle;
 
 /// Route arguments for [MobileTransactionStatusScreen]. The row that
 /// was tapped passes its [initialTransaction] so the screen renders
@@ -235,7 +236,17 @@ class _MobileTransactionStatusScreenState
   bool get _isMigration =>
       (_transaction?.txKind ?? widget.args.txKind) == 'migration';
 
+  bool get _isNames =>
+      isNamesActivityKind(_transaction?.txKind ?? widget.args.txKind);
+
   String get _title {
+    if (_isNames) {
+      return namesActivityTitle(
+        _transaction?.txKind ?? widget.args.txKind!,
+        isPending: _phase == _TxPhase.pending,
+        isFailed: _phase == _TxPhase.failed,
+      );
+    }
     if (_isShielding) return 'Shielded';
     if (_isMigration) {
       return switch (_phase) {
@@ -359,7 +370,7 @@ class _MobileTransactionStatusScreenState
           )
         : null;
     final amountRow = MobileReviewInfoRow(
-      label: 'Amount',
+      label: _isNames ? 'Bond' : 'Amount',
       value: amountText,
       leading: const MobileReviewZecBadge(),
       // With no counterparty row (shielded senders are unknown), the

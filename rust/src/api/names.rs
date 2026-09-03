@@ -42,7 +42,7 @@ pub struct ApiNamesCommitProposal {
     pub commitment: Vec<u8>,
 }
 
-/// Reviewed REVEAL proposal backed by an atomically consumed Rust capability.
+/// Reviewed Names proposal backed by an atomically consumed Rust capability.
 pub struct ApiNamesRevealProposal {
     pub proposal_id: u64,
     pub fee_zatoshi: u64,
@@ -404,7 +404,54 @@ pub fn reveal_names_registration(
     Ok(txid.to_vec())
 }
 
+/// Builds a current-head Names transition for the shared wallet review flow.
+/// Construction reserves any fee input, but nothing is broadcast here.
+pub fn begin_names_management(
+    db_path: String,
+    lightwalletd_url: String,
+    network: String,
+    account_uuid: String,
+    send_flow_id: String,
+    name: String,
+    action: String,
+    payment_address: Option<String>,
+    mnemonic_bytes: Vec<u8>,
+) -> Result<ApiNamesRevealProposal, String> {
+    use crate::wallet::names_lifecycle::NamesTransitionKind;
+
+    let network = keys::parse_network(&network)?;
+    keys::ensure_db_migrated_once(&db_path, network)?;
+    let kind = match action.as_str() {
+        "update" => NamesTransitionKind::Update(
+            payment_address.ok_or_else(|| "UPDATE requires a payment address".to_string())?,
+        ),
+        "renew" => NamesTransitionKind::Renew,
+        "release" => NamesTransitionKind::Release,
+        _ => return Err(format!("unknown Names management action: {action}")),
+    };
+    let mnemonic_bytes = Zeroizing::new(mnemonic_bytes);
+    let seed = keys::mnemonic_bytes_to_seed(mnemonic_bytes.as_slice())?;
+    drop(mnemonic_bytes);
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| format!("tokio: {error}"))?;
+    let proposal = runtime.block_on(crate::wallet::names_lifecycle::begin_reviewed_transition(
+        &db_path,
+        &lightwalletd_url,
+        network,
+        &account_uuid,
+        &name,
+        &send_flow_id,
+        kind,
+        seed,
+    ))?;
+    Ok(ApiNamesRevealProposal {
+        proposal_id: proposal.proposal_id,
+        fee_zatoshi: proposal.fee_zatoshi,
+    })
+}
+
 /// Proves and broadcasts one canonical current-head transition.
+/// Retained for non-UI qualification callers; wallet UI must use
+/// `begin_names_management` and the shared review flow.
 pub fn manage_name(
     db_path: String,
     lightwalletd_url: String,

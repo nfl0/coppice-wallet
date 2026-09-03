@@ -35,6 +35,8 @@ class SendReviewArgs {
     required this.feeZatoshi,
     required this.needsSaplingParams,
     this.memo,
+    this.cancelLocation = '/send',
+    this.completionLocation = '/home',
   });
 
   final BigInt proposalId;
@@ -46,6 +48,8 @@ class SendReviewArgs {
   final BigInt feeZatoshi;
   final bool needsSaplingParams;
   final String? memo;
+  final String cancelLocation;
+  final String completionLocation;
 
   bool get isShielded => addressType == 'unified' || addressType == 'sapling';
 }

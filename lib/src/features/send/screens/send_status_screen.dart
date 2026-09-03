@@ -127,7 +127,7 @@ class _SendStatusScreenState extends ConsumerState<SendStatusScreen> {
   Future<void> _goHome() async {
     if (!mounted) return;
     ref.read(sendStatusRoutePayloadProvider.notifier).clear();
-    context.go('/home');
+    context.go(widget.args.completionLocation);
   }
 
   void _copyTransactionHash() {

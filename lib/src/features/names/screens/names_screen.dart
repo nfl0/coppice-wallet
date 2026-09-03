@@ -287,13 +287,14 @@ class _NamesViewState extends ConsumerState<NamesView> {
   ) async {
     String? address;
     if (action == 'update') {
-      final controller = TextEditingController(text: item.paymentAddress ?? '');
+      var proposedAddress = item.paymentAddress ?? '';
       address = await showDialog<String>(
         context: context,
         builder: (context) => AlertDialog(
           title: Text('Update ${item.name}.zec'),
-          content: TextField(
-            controller: controller,
+          content: TextFormField(
+            initialValue: proposedAddress,
+            onChanged: (value) => proposedAddress = value,
             decoration: const InputDecoration(labelText: 'New payment address'),
           ),
           actions: [
@@ -302,13 +303,12 @@ class _NamesViewState extends ConsumerState<NamesView> {
               child: const Text('Cancel'),
             ),
             TextButton(
-              onPressed: () => Navigator.pop(context, controller.text.trim()),
+              onPressed: () => Navigator.pop(context, proposedAddress.trim()),
               child: const Text('Update'),
             ),
           ],
         ),
       );
-      controller.dispose();
       if (address == null || address.isEmpty) return;
     } else if (action == 'release') {
       final confirmed = await showDialog<bool>(
@@ -336,10 +336,39 @@ class _NamesViewState extends ConsumerState<NamesView> {
       _managedNameInFlight = item.name;
       _managedNameError = null;
     });
-    final error = await ref
-        .read(managedNamesProvider.notifier)
-        .manage(item.name, action, paymentAddress: address);
+    final notifier = ref.read(managedNamesProvider.notifier);
+    String? error;
+    final review = await notifier.beginManagement(
+      item.name,
+      action,
+      paymentAddress: address,
+    );
+    if (review == null) {
+      error = notifier.lastManagementError;
+    } else {
+      if (!mounted) {
+        await discardSendProposal(
+          proposalId: review.proposalId,
+          sendFlowId: review.sendFlowId,
+          logContext: 'NamesManagement(disposed)',
+        );
+        return;
+      }
+      try {
+        final reviewRoute = context.push('/send/review', extra: review);
+        if (mounted) setState(() => _managedNameInFlight = null);
+        await reviewRoute;
+      } catch (routeError) {
+        await discardSendProposal(
+          proposalId: review.proposalId,
+          sendFlowId: review.sendFlowId,
+          logContext: 'NamesManagement(route-failure)',
+        );
+        error = routeError.toString();
+      }
+    }
     if (!mounted) return;
+    unawaited(_refreshNamesAfterCompletedSync());
     setState(() {
       _managedNameInFlight = null;
       _managedNameError = error;
@@ -453,8 +482,7 @@ class _NamesViewState extends ConsumerState<NamesView> {
                   onResumeRegistration: _resumeRegistration,
                   onDiscardRegistration: _discardRegistration,
                   onManage: _manageName,
-                  onRefresh: () =>
-                      ref.read(managedNamesProvider.notifier).refresh(),
+                  onRefresh: _refreshNamesAfterCompletedSync,
                 ),
               ],
             ),

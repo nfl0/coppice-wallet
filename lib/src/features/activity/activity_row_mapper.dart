@@ -38,10 +38,13 @@ ActivityRowData buildTransactionActivityRow({
   final isSent = kind == 'sent';
   final isShielded = kind == 'shielded';
   final isMigration = kind == 'migration';
+  final isNames = isNamesActivityKind(kind);
   final isInbound = isReceived || isReceiving;
   final signedAmount = isSent ? -amount : amount;
   final subtitle = isMigration
       ? 'Orchard → Ironwood'
+      : isNames
+      ? 'Coppice Names'
       : isInbound || isSent
       ? _poolLabel(transaction.displayPool)
       : null;
@@ -49,11 +52,14 @@ ActivityRowData buildTransactionActivityRow({
   // Unconfirmed sends/receives render as in-flight rows: a pulsing loader
   // in the leading slot and a progressive title, per the Content Line
   // pending variant in the design.
-  final isInFlight = isPending && (isInbound || isSent || isMigration);
+  final isInFlight =
+      isPending && (isInbound || isSent || isMigration || isNames);
 
   return ActivityRowData(
     stableId: 'tx:${transaction.txidHex}:${_stableTransactionRole(kind)}',
-    title: isFailed && (isSent || isMigration)
+    title: isNames
+        ? namesActivityTitle(kind, isPending: isPending, isFailed: isFailed)
+        : isFailed && (isSent || isMigration)
         ? isMigration
               ? 'Migration failed'
               : 'Send failed'
@@ -76,7 +82,7 @@ ActivityRowData buildTransactionActivityRow({
         amount: amount,
         signedAmount: signedAmount,
         isFailed: isFailed,
-        isUnsignedAmount: isShielded || isMigration,
+        isUnsignedAmount: isShielded || isMigration || isNames,
         kind: kind,
         privacyModeEnabled: privacyModeEnabled,
       ),
@@ -90,7 +96,11 @@ ActivityRowData buildTransactionActivityRow({
         : isInbound
         ? colors.text.positiveStrong
         : outgoingAmountColor(colors),
-    amountSubtitle: isFailed && amount != BigInt.zero ? 'Refunded' : null,
+    amountSubtitle: isFailed && amount != BigInt.zero
+        ? isNames
+              ? 'Bond preserved'
+              : 'Refunded'
+        : null,
     statusText: isFailed
         ? 'Failed'
         : isPending
@@ -173,10 +183,53 @@ String _txTitle(String kind) {
   };
 }
 
+bool isNamesActivityKind(String? kind) => kind?.startsWith('names_') ?? false;
+
+String namesActivityTitle(
+  String kind, {
+  required bool isPending,
+  required bool isFailed,
+}) {
+  final separator = kind.indexOf(':');
+  final action = kind.substring(
+    'names_'.length,
+    separator < 0 ? kind.length : separator,
+  );
+  final rawName = separator < 0 ? '' : kind.substring(separator + 1);
+  final name = rawName.isEmpty ? 'name' : '$rawName.zec';
+  final verb = switch ((action, isPending, isFailed)) {
+    ('commit', true, _) => 'Committing',
+    ('commit', _, true) => 'Name commitment failed for',
+    ('commit', _, _) => 'Committed',
+    ('reveal', true, _) => 'Revealing',
+    ('reveal', _, true) => 'Registration failed for',
+    ('reveal', _, _) => 'Registered',
+    ('update', true, _) => 'Updating',
+    ('update', _, true) => 'Update failed for',
+    ('update', _, _) => 'Updated',
+    ('renew', true, _) => 'Renewing',
+    ('renew', _, true) => 'Renewal failed for',
+    ('renew', _, _) => 'Renewed',
+    ('release', true, _) => 'Releasing',
+    ('release', _, true) => 'Release failed for',
+    ('release', _, _) => 'Released',
+    (_, true, _) => 'Updating',
+    (_, _, true) => 'Names transaction failed for',
+    _ => 'Updated',
+  };
+  final suffix = isPending && kAppFormFactor == AppFormFactor.mobile
+      ? '...'
+      : isPending
+      ? ' ...'
+      : '';
+  return '$verb $name$suffix';
+}
+
 String _txIcon(String kind, {required bool isPending}) {
   if (isPending) {
     return switch (kind) {
       'receiving' || 'received' || 'sent' || 'migration' => AppIcons.loader,
+      _ when isNamesActivityKind(kind) => AppIcons.loader,
       _ => AppIcons.history,
     };
   }

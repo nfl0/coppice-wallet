@@ -524,7 +524,7 @@ pub(super) static PROPOSAL_STORE: std::sync::LazyLock<Mutex<ProposalStore>> =
         Mutex::new(ProposalStore {
             proposals: HashMap::new(),
             locks: HashMap::new(),
-            names_reveals: HashMap::new(),
+            names_transactions: HashMap::new(),
             next_id: 1,
         })
     });
@@ -532,16 +532,16 @@ pub(super) static PROPOSAL_STORE: std::sync::LazyLock<Mutex<ProposalStore>> =
 pub(super) struct ProposalStore {
     pub proposals: HashMap<u64, StoredProposal>,
     pub locks: HashMap<u64, StoredProposalLock>,
-    /// Names REVEAL capabilities have a distinct map from ordinary send
+    /// Prebuilt Names transactions have a distinct map from ordinary send
     /// proposals. Both maps draw IDs from `next_id` while sharing this mutex,
     /// so a stale ordinary-send operation can never consume a Names
     /// capability (or vice versa).
-    pub names_reveals: HashMap<u64, NamesRevealCapability>,
+    pub names_transactions: HashMap<u64, NamesTransactionCapability>,
     pub next_id: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct NamesRevealExecution {
+pub(super) struct NamesTransactionExecution {
     pub raw: Vec<u8>,
     pub txid: [u8; 32],
     pub db_path: String,
@@ -551,52 +551,82 @@ pub(super) struct NamesRevealExecution {
     pub valid_from_height: u32,
     pub expiry_height: u32,
     pub fee_zatoshi: u64,
+    pub kind: NamesTransactionKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NamesTransactionKind {
+    Reveal,
+    Update,
+    Renew,
+    Release,
+}
+
+impl NamesTransactionKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reveal => "REVEAL",
+            Self::Update => "UPDATE",
+            Self::Renew => "RENEW",
+            Self::Release => "RELEASE",
+        }
+    }
+
+    fn activity_action(self) -> &'static str {
+        match self {
+            Self::Reveal => "reveal",
+            Self::Update => "update",
+            Self::Renew => "renew",
+            Self::Release => "release",
+        }
+    }
 }
 
 /// Minimal bounded metadata that must survive a retain operation. The store
 /// does not interpret the payload or the eventual Names transaction here.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct NamesRevealLockMetadata {
+pub(super) struct NamesTransactionLockMetadata {
     pub expiry_height: u64,
 }
 
 /// Capability-specific release work is supplied as Send + Sync data. The
 /// `Arc` makes the record movable out of the store mutex; removing the record
 /// before invoking the callback makes release at-most-once even on failure.
-pub(super) type NamesRevealRelease = Arc<dyn Fn() -> Result<(), String> + Send + Sync + 'static>;
-pub(super) type NamesRevealRetain =
-    Arc<dyn Fn(NamesRevealLockMetadata) -> Result<(), String> + Send + Sync + 'static>;
+pub(super) type NamesTransactionRelease =
+    Arc<dyn Fn() -> Result<(), String> + Send + Sync + 'static>;
+pub(super) type NamesTransactionRetain =
+    Arc<dyn Fn(NamesTransactionLockMetadata) -> Result<(), String> + Send + Sync + 'static>;
 
 /// Cleanup actions are intentionally generic and contain only Send + Sync
 /// callback data. The final Names transaction type is not part of stage 1.
-pub(super) enum NamesRevealCleanup {
+pub(super) enum NamesTransactionCleanup {
     Callbacks {
-        release: NamesRevealRelease,
-        retain: NamesRevealRetain,
+        release: NamesTransactionRelease,
+        retain: NamesTransactionRetain,
     },
 }
 
-pub(super) struct NamesRevealCapability {
+pub(super) struct NamesTransactionCapability {
     pub proposal_id: u64,
     pub send_flow_id: String,
-    pub execution: NamesRevealExecution,
-    pub lock: NamesRevealLockMetadata,
-    pub cleanup: NamesRevealCleanup,
+    pub execution: NamesTransactionExecution,
+    pub lock: NamesTransactionLockMetadata,
+    pub cleanup: NamesTransactionCleanup,
 }
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct NamesRevealCapabilityView {
+pub(super) struct NamesTransactionCapabilityView {
     pub proposal_id: u64,
     pub send_flow_id: String,
-    pub execution: NamesRevealExecution,
-    pub lock: NamesRevealLockMetadata,
+    pub execution: NamesTransactionExecution,
+    pub lock: NamesTransactionLockMetadata,
 }
 
-impl NamesRevealCapability {
+impl NamesTransactionCapability {
     #[allow(dead_code)]
-    fn view(&self) -> NamesRevealCapabilityView {
-        NamesRevealCapabilityView {
+    fn view(&self) -> NamesTransactionCapabilityView {
+        NamesTransactionCapabilityView {
             proposal_id: self.proposal_id,
             send_flow_id: self.send_flow_id.clone(),
             execution: self.execution.clone(),
@@ -607,14 +637,14 @@ impl NamesRevealCapability {
     /// Finish a consumed capability's release path. Taking ownership here
     /// prevents callers from accidentally invoking cleanup more than once.
     pub(super) fn release(self) -> Result<(), String> {
-        let NamesRevealCleanup::Callbacks { release, .. } = self.cleanup;
+        let NamesTransactionCleanup::Callbacks { release, .. } = self.cleanup;
         release()
     }
 
     /// Finish a consumed capability's retain path, preserving the bounded
     /// lock metadata in the capability-specific callback.
     pub(super) fn retain(self) -> Result<(), String> {
-        let NamesRevealCleanup::Callbacks { retain, .. } = self.cleanup;
+        let NamesTransactionCleanup::Callbacks { retain, .. } = self.cleanup;
         retain(self.lock)
     }
 }
@@ -628,23 +658,23 @@ pub(super) fn next_proposal_id(store: &mut ProposalStore) -> u64 {
     id
 }
 
-/// Store an opaque Names REVEAL capability and its bounded lock metadata.
-pub(super) fn allocate_names_reveal_capability(
+/// Store an opaque Names transaction capability and its bounded lock metadata.
+pub(super) fn allocate_names_transaction_capability(
     send_flow_id: &str,
-    execution: NamesRevealExecution,
-    lock: NamesRevealLockMetadata,
-    cleanup: NamesRevealCleanup,
+    execution: NamesTransactionExecution,
+    lock: NamesTransactionLockMetadata,
+    cleanup: NamesTransactionCleanup,
 ) -> Result<u64, String> {
     if send_flow_id.is_empty() {
-        return Err("Names REVEAL send flow ID cannot be empty".to_string());
+        return Err("Names send flow ID cannot be empty".to_string());
     }
     let mut store = PROPOSAL_STORE
         .lock()
-        .map_err(|e| format!("Lock proposal store for Names REVEAL allocation: {e}"))?;
+        .map_err(|e| format!("Lock proposal store for Names allocation: {e}"))?;
     let proposal_id = next_proposal_id(&mut store);
-    store.names_reveals.insert(
+    store.names_transactions.insert(
         proposal_id,
-        NamesRevealCapability {
+        NamesTransactionCapability {
             proposal_id,
             send_flow_id: send_flow_id.to_string(),
             execution,
@@ -655,15 +685,15 @@ pub(super) fn allocate_names_reveal_capability(
     Ok(proposal_id)
 }
 
-fn names_reveal_flow_matches(
-    capability: &NamesRevealCapability,
+fn names_transaction_flow_matches(
+    capability: &NamesTransactionCapability,
     send_flow_id: &str,
 ) -> Result<(), String> {
     if capability.send_flow_id == send_flow_id {
         Ok(())
     } else {
         log::warn!(
-            "proposal store: Names REVEAL send flow mismatch for proposal_id={}",
+            "proposal store: Names send flow mismatch for proposal_id={}",
             capability.proposal_id
         );
         Err("Send flow mismatch".to_string())
@@ -673,68 +703,68 @@ fn names_reveal_flow_matches(
 /// Inspect without consuming. A flow mismatch is distinguished from an
 /// absent capability so callers cannot probe another flow's payload.
 #[allow(dead_code)]
-pub(super) fn inspect_names_reveal_capability(
+pub(super) fn inspect_names_transaction_capability(
     proposal_id: u64,
     send_flow_id: &str,
-) -> Result<Option<NamesRevealCapabilityView>, String> {
+) -> Result<Option<NamesTransactionCapabilityView>, String> {
     let store = PROPOSAL_STORE
         .lock()
-        .map_err(|e| format!("Lock proposal store to inspect Names REVEAL: {e}"))?;
-    let Some(capability) = store.names_reveals.get(&proposal_id) else {
+        .map_err(|e| format!("Lock proposal store to inspect Names transaction: {e}"))?;
+    let Some(capability) = store.names_transactions.get(&proposal_id) else {
         return Ok(None);
     };
-    names_reveal_flow_matches(capability, send_flow_id)?;
+    names_transaction_flow_matches(capability, send_flow_id)?;
     Ok(Some(capability.view()))
 }
 
-/// Consume a Names REVEAL capability exactly once.
+/// Consume a Names transaction capability exactly once.
 #[allow(dead_code)]
-pub(super) fn take_names_reveal_capability(
+pub(super) fn take_names_transaction_capability(
     proposal_id: u64,
     send_flow_id: &str,
-) -> Result<NamesRevealCapability, String> {
-    try_take_names_reveal_capability(proposal_id, send_flow_id)?.ok_or_else(|| {
-        "Names REVEAL capability not found (expired or already consumed)".to_string()
+) -> Result<NamesTransactionCapability, String> {
+    try_take_names_transaction_capability(proposal_id, send_flow_id)?.ok_or_else(|| {
+        "Names transaction capability not found (expired or already consumed)".to_string()
     })
 }
 
-/// Atomically inspect and consume a Names REVEAL capability. `None` means no
+/// Atomically inspect and consume a Names transaction capability. `None` means no
 /// Names capability exists for this ID; a present capability with another
 /// flow ID is still rejected without consuming it.
-pub(super) fn try_take_names_reveal_capability(
+pub(super) fn try_take_names_transaction_capability(
     proposal_id: u64,
     send_flow_id: &str,
-) -> Result<Option<NamesRevealCapability>, String> {
+) -> Result<Option<NamesTransactionCapability>, String> {
     let mut store = PROPOSAL_STORE
         .lock()
-        .map_err(|e| format!("Lock proposal store to consume Names REVEAL: {e}"))?;
-    let Some(capability) = store.names_reveals.get(&proposal_id) else {
+        .map_err(|e| format!("Lock proposal store to consume Names transaction: {e}"))?;
+    let Some(capability) = store.names_transactions.get(&proposal_id) else {
         return Ok(None);
     };
-    names_reveal_flow_matches(capability, send_flow_id)?;
-    Ok(store.names_reveals.remove(&proposal_id))
+    names_transaction_flow_matches(capability, send_flow_id)?;
+    Ok(store.names_transactions.remove(&proposal_id))
 }
 
-/// Discard a Names REVEAL capability. Removing it before release work makes
+/// Discard a Names transaction capability. Removing it before release work makes
 /// this idempotent and guarantees that a release callback is invoked once.
 /// The boolean reports whether this was a Names capability, allowing generic
 /// proposal APIs to fall through to their unchanged ordinary-send logic.
-pub(super) fn discard_names_reveal_capability(
+pub(super) fn discard_names_transaction_capability(
     proposal_id: u64,
     send_flow_id: &str,
 ) -> Result<bool, String> {
     let capability = {
         let mut store = PROPOSAL_STORE
             .lock()
-            .map_err(|e| format!("Lock proposal store for Names REVEAL discard: {e}"))?;
-        let Some(capability) = store.names_reveals.get(&proposal_id) else {
+            .map_err(|e| format!("Lock proposal store for Names discard: {e}"))?;
+        let Some(capability) = store.names_transactions.get(&proposal_id) else {
             return Ok(false);
         };
-        names_reveal_flow_matches(capability, send_flow_id)?;
-        store.names_reveals.remove(&proposal_id)
+        names_transaction_flow_matches(capability, send_flow_id)?;
+        store.names_transactions.remove(&proposal_id)
     };
-    let capability = capability
-        .ok_or_else(|| "Names REVEAL capability disappeared while discarding".to_string())?;
+    let capability =
+        capability.ok_or_else(|| "Names capability disappeared while discarding".to_string())?;
     capability.release()?;
     Ok(true)
 }
@@ -742,45 +772,45 @@ pub(super) fn discard_names_reveal_capability(
 /// Remove replay capability while handing its bounded lock metadata to the
 /// capability-specific retain callback. Removing before callback execution
 /// makes a repeated retain a no-op and guarantees one callback invocation.
-pub(super) fn retain_names_reveal_capability_until_expiry(
+pub(super) fn retain_names_transaction_capability_until_expiry(
     proposal_id: u64,
     send_flow_id: &str,
 ) -> Result<bool, String> {
     let capability = {
         let mut store = PROPOSAL_STORE
             .lock()
-            .map_err(|e| format!("Lock proposal store for Names REVEAL retain: {e}"))?;
-        let Some(capability) = store.names_reveals.get(&proposal_id) else {
+            .map_err(|e| format!("Lock proposal store for Names retain: {e}"))?;
+        let Some(capability) = store.names_transactions.get(&proposal_id) else {
             return Ok(false);
         };
-        names_reveal_flow_matches(capability, send_flow_id)?;
-        store.names_reveals.remove(&proposal_id)
+        names_transaction_flow_matches(capability, send_flow_id)?;
+        store.names_transactions.remove(&proposal_id)
     };
-    let capability = capability
-        .ok_or_else(|| "Names REVEAL capability disappeared while retaining".to_string())?;
+    let capability =
+        capability.ok_or_else(|| "Names capability disappeared while retaining".to_string())?;
     capability.retain()?;
     Ok(true)
 }
 
-/// Try the reviewed Names REVEAL execution path before ordinary mnemonic
+/// Try the reviewed Names transaction path before ordinary mnemonic
 /// handling. The capability is consumed atomically before any seed handling.
-pub(crate) async fn try_execute_names_reveal_proposal(
+pub(crate) async fn try_execute_names_transaction_proposal(
     db_path: &str,
     lightwalletd_url: &str,
     proposal_id: u64,
     send_flow_id: &str,
 ) -> Result<Option<ExecuteProposalResult>, String> {
-    let Some(capability) = try_take_names_reveal_capability(proposal_id, send_flow_id)? else {
+    let Some(capability) = try_take_names_transaction_capability(proposal_id, send_flow_id)? else {
         return Ok(None);
     };
     let execution = capability.execution.clone();
 
     if db_path != execution.db_path {
-        let error = "Names REVEAL proposal belongs to a different wallet database".to_string();
+        let error = "Names proposal belongs to a different wallet database".to_string();
         return match capability.release() {
             Ok(()) => Err(error),
             Err(cleanup_error) => Err(format!(
-                "{error}; additionally failed to release Names REVEAL fee note: {cleanup_error}"
+                "{error}; additionally failed to release the Names fee note: {cleanup_error}"
             )),
         };
     }
@@ -795,7 +825,7 @@ pub(crate) async fn try_execute_names_reveal_proposal(
         return match capability.release() {
             Ok(()) => Err(error),
             Err(cleanup_error) => Err(format!(
-                "{error}; additionally failed to release Names REVEAL fee note: {cleanup_error}"
+                "{error}; additionally failed to release the Names fee note: {cleanup_error}"
             )),
         };
     }
@@ -805,7 +835,8 @@ pub(crate) async fn try_execute_names_reveal_proposal(
             let mut warnings = Vec::new();
             if let Err(error) = capability.retain() {
                 warnings.push(format!(
-                    "failed to retain the Names REVEAL fee lock after broadcast: {error}"
+                    "failed to retain the Names {} fee lock after broadcast: {error}",
+                    execution.kind.label()
                 ));
             }
             if let Err(error) = decrypt_and_store_transaction(
@@ -817,21 +848,34 @@ pub(crate) async fn try_execute_names_reveal_proposal(
                 warnings.push(format!(
                     "broadcast succeeded but local transaction storage failed: {error}"
                 ));
-            } else if let Err(error) = crate::wallet::coppice::record_reveal_broadcast(
-                &execution.db_path,
-                &execution.account_uuid,
-                &execution.name,
-                execution.txid,
-            ) {
-                warnings.push(format!(
-                    "broadcast and local transaction storage succeeded but Names metadata update failed: {error}"
-                ));
+            } else {
+                let metadata_result = if execution.kind == NamesTransactionKind::Reveal {
+                    crate::wallet::coppice::record_reveal_broadcast(
+                        &execution.db_path,
+                        &execution.account_uuid,
+                        &execution.name,
+                        execution.txid,
+                    )
+                } else {
+                    crate::wallet::coppice::record_names_activity(
+                        &execution.db_path,
+                        &execution.account_uuid,
+                        &execution.name,
+                        execution.kind.activity_action(),
+                        execution.txid,
+                    )
+                };
+                if let Err(error) = metadata_result {
+                    warnings.push(format!(
+                        "broadcast and local transaction storage succeeded but Names metadata update failed: {error}"
+                    ));
+                }
             }
             let message = if warnings.is_empty() {
                 None
             } else {
                 for warning in &warnings {
-                    log::warn!("Names REVEAL: {warning}");
+                    log::warn!("Names {}: {warning}", execution.kind.label());
                 }
                 Some(warnings.join("; "))
             };
@@ -858,7 +902,7 @@ pub(crate) async fn try_execute_names_reveal_proposal(
                 ),
                 None => format!("broadcast outcome is unknown: {error}"),
             };
-            log::warn!("Names REVEAL: {message}");
+            log::warn!("Names {}: {message}", execution.kind.label());
             Ok(Some(ExecuteProposalResult {
                 txids: hex::encode(execution.txid),
                 status: "broadcast_unknown".to_string(),
@@ -1155,9 +1199,9 @@ mod tests {
     }
 
     fn names_capability(flow: &str) -> u64 {
-        allocate_names_reveal_capability(
+        allocate_names_transaction_capability(
             flow,
-            NamesRevealExecution {
+            NamesTransactionExecution {
                 raw: vec![0x42],
                 txid: [0; 32],
                 db_path: "test.db".to_string(),
@@ -1167,9 +1211,10 @@ mod tests {
                 valid_from_height: 123,
                 expiry_height: 123,
                 fee_zatoshi: 1,
+                kind: NamesTransactionKind::Reveal,
             },
-            NamesRevealLockMetadata { expiry_height: 123 },
-            NamesRevealCleanup::Callbacks {
+            NamesTransactionLockMetadata { expiry_height: 123 },
+            NamesTransactionCleanup::Callbacks {
                 release: Arc::new(|| Ok(())),
                 retain: Arc::new(|_| Ok(())),
             },
@@ -1180,7 +1225,7 @@ mod tests {
     fn remove_names_test_entries(ids: &[u64]) {
         let mut store = PROPOSAL_STORE.lock().unwrap();
         for id in ids {
-            store.names_reveals.remove(id);
+            store.names_transactions.remove(id);
         }
     }
 
@@ -1190,8 +1235,8 @@ mod tests {
         let second = names_capability("names-id-flow-2");
         assert_ne!(first, second);
         let store = PROPOSAL_STORE.lock().unwrap();
-        assert!(store.names_reveals.contains_key(&first));
-        assert!(store.names_reveals.contains_key(&second));
+        assert!(store.names_transactions.contains_key(&first));
+        assert!(store.names_transactions.contains_key(&second));
         assert!(store.next_id > second);
         assert!(!store.proposals.contains_key(&first));
         assert!(!store.locks.contains_key(&first));
@@ -1202,16 +1247,16 @@ mod tests {
     #[test]
     fn names_reveal_inspect_and_take_reject_mismatch_and_consume_once() {
         let id = names_capability("names-take-flow");
-        let mismatch = inspect_names_reveal_capability(id, "wrong-flow");
+        let mismatch = inspect_names_transaction_capability(id, "wrong-flow");
         assert!(matches!(mismatch, Err(ref error) if error == "Send flow mismatch"));
 
-        let inspected = inspect_names_reveal_capability(id, "names-take-flow")
+        let inspected = inspect_names_transaction_capability(id, "names-take-flow")
             .unwrap()
             .unwrap();
         assert_eq!(inspected.execution.raw, vec![0x42]);
-        let taken = take_names_reveal_capability(id, "names-take-flow").unwrap();
+        let taken = take_names_transaction_capability(id, "names-take-flow").unwrap();
         assert_eq!(taken.execution.raw, vec![0x42]);
-        assert!(take_names_reveal_capability(id, "names-take-flow").is_err());
+        assert!(take_names_transaction_capability(id, "names-take-flow").is_err());
         remove_names_test_entries(&[id]);
     }
 
@@ -1221,9 +1266,9 @@ mod tests {
 
         let release_count = Arc::new(AtomicUsize::new(0));
         let release_count_for_callback = release_count.clone();
-        let id = allocate_names_reveal_capability(
+        let id = allocate_names_transaction_capability(
             "names-discard-flow",
-            NamesRevealExecution {
+            NamesTransactionExecution {
                 raw: vec![1, 2, 3],
                 txid: [0; 32],
                 db_path: "test.db".to_string(),
@@ -1233,9 +1278,10 @@ mod tests {
                 valid_from_height: 123,
                 expiry_height: 456,
                 fee_zatoshi: 1,
+                kind: NamesTransactionKind::Release,
             },
-            NamesRevealLockMetadata { expiry_height: 456 },
-            NamesRevealCleanup::Callbacks {
+            NamesTransactionLockMetadata { expiry_height: 456 },
+            NamesTransactionCleanup::Callbacks {
                 release: Arc::new(move || {
                     release_count_for_callback.fetch_add(1, Ordering::SeqCst);
                     Ok(())
@@ -1259,9 +1305,9 @@ mod tests {
         let retained_height = Arc::new(AtomicU64::new(0));
         let retain_count_for_callback = retain_count.clone();
         let retained_height_for_callback = retained_height.clone();
-        let id = allocate_names_reveal_capability(
+        let id = allocate_names_transaction_capability(
             "names-retain-flow",
-            NamesRevealExecution {
+            NamesTransactionExecution {
                 raw: vec![0x42],
                 txid: [0; 32],
                 db_path: "test.db".to_string(),
@@ -1271,9 +1317,10 @@ mod tests {
                 valid_from_height: 123,
                 expiry_height: 123,
                 fee_zatoshi: 1,
+                kind: NamesTransactionKind::Renew,
             },
-            NamesRevealLockMetadata { expiry_height: 123 },
-            NamesRevealCleanup::Callbacks {
+            NamesTransactionLockMetadata { expiry_height: 123 },
+            NamesTransactionCleanup::Callbacks {
                 release: Arc::new(|| Ok(())),
                 retain: Arc::new(move |lock| {
                     retain_count_for_callback.fetch_add(1, Ordering::SeqCst);
@@ -1284,14 +1331,16 @@ mod tests {
         )
         .unwrap();
         assert!(pczt::retain_proposal_lock_until_expiry(id, "wrong-flow").is_err());
-        assert!(inspect_names_reveal_capability(id, "names-retain-flow")
-            .unwrap()
-            .is_some());
+        assert!(
+            inspect_names_transaction_capability(id, "names-retain-flow")
+                .unwrap()
+                .is_some()
+        );
         assert!(pczt::retain_proposal_lock_until_expiry(id, "names-retain-flow").is_ok());
         assert!(pczt::retain_proposal_lock_until_expiry(id, "names-retain-flow").is_ok());
 
         let store = PROPOSAL_STORE.lock().unwrap();
-        assert!(!store.names_reveals.contains_key(&id));
+        assert!(!store.names_transactions.contains_key(&id));
         drop(store);
         assert_eq!(retain_count.load(Ordering::SeqCst), 1);
         assert_eq!(retained_height.load(Ordering::SeqCst), 123);
@@ -1303,7 +1352,7 @@ mod tests {
 
     #[tokio::test]
     async fn names_reveal_execution_dispatch_ignores_unknown_id_without_network_or_seed() {
-        let result = try_execute_names_reveal_proposal(
+        let result = try_execute_names_transaction_proposal(
             "/unused/wallet.db",
             "https://unused.invalid",
             unique_proposal_id(),

@@ -2407,6 +2407,10 @@ class SyncNotifier extends AsyncNotifier<SyncState> {
   Future<void> refreshAfterSend() =>
       _requestBalanceRefresh(releaseSnapshotOnAuthoritativeBalance: true);
 
+  /// Re-read account data after local Names state changes what counts as
+  /// locked holdings, without starting another chain scan.
+  Future<void> refreshAfterNamesStateChange() => _requestBalanceRefresh();
+
   /// Reconciles the account selected by a switch or active-account removal.
   ///
   /// If its balance summary is temporarily unavailable, discard only the

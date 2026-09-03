@@ -129,7 +129,7 @@ class _MobileSendStatusScreenState
       context.pop();
       return;
     }
-    context.go('/home');
+    context.go(widget.args.completionLocation);
   }
 
   bool get _routePopAllowed => _phase != _MobileSendStatusPhase.sending;

@@ -130,6 +130,44 @@ void main() {
     expect(row.leadingIconName, isNot(AppIcons.loader));
   });
 
+  testWidgets('Names transitions retain their operation and name in Activity', (
+    tester,
+  ) async {
+    final row = await mapRow(
+      tester,
+      _transaction(
+        txKind: 'names_release:111',
+        minedHeight: BigInt.zero,
+        displayAmount: BigInt.from(100000000),
+        displayPool: 'ironwood',
+      ),
+    );
+
+    expect(row.title, 'Releasing 111.zec ...');
+    expect(row.subtitle, 'Coppice Names');
+    expect(row.leadingIconName, AppIcons.loader);
+    expect(row.amountText, '1 ZEC');
+  });
+
+  testWidgets('dropped Names transitions preserve the bond label', (
+    tester,
+  ) async {
+    final row = await mapRow(
+      tester,
+      _transaction(
+        txKind: 'names_release:111',
+        minedHeight: BigInt.zero,
+        expiredUnmined: true,
+        displayAmount: BigInt.from(100000000),
+        displayPool: 'ironwood',
+      ),
+    );
+
+    expect(row.title, 'Release failed for 111.zec');
+    expect(row.amountSubtitle, 'Bond preserved');
+    expect(row.statusText, 'Failed');
+  });
+
   testWidgets('transaction rows route the amount through the form-factor gate', (
     tester,
   ) async {

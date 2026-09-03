@@ -4,6 +4,7 @@ import '../../../../main.dart' show log;
 import '../../../core/storage/wallet_paths.dart';
 import '../../../providers/account_provider.dart';
 import '../../../providers/rpc_endpoint_provider.dart';
+import '../../../providers/sync_provider.dart';
 import '../../../rust/api/names.dart' as rust_names;
 import '../../send/services/send_flow.dart';
 import '../models/names_deployment.dart';
@@ -305,10 +306,12 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
         proposalAccountUuid: accountUuid,
         address: 'Coppice Names COMMIT',
         addressType: 'unified',
-        amountZatoshi: BigInt.one,
+        amountZatoshi: BigInt.from(kNamesBondZatoshis),
         feeZatoshi: proposal.feeZatoshi,
         needsSaplingParams: false,
         memo: 'Register ${name.trim().toLowerCase()}',
+        cancelLocation: '/names',
+        completionLocation: '/names',
       );
     } catch (error) {
       log('Names: registration proposal failed: $error');
@@ -351,8 +354,10 @@ final managedNamesProvider =
 class ManagedNamesNotifier
     extends AsyncNotifier<List<rust_names.ApiManagedName>> {
   String? _lastRevealError;
+  String? _lastManagementError;
 
   String? get lastRevealError => _lastRevealError;
+  String? get lastManagementError => _lastManagementError;
 
   @override
   Future<List<rust_names.ApiManagedName>> build() async {
@@ -459,10 +464,12 @@ class ManagedNamesNotifier
         proposalAccountUuid: accountUuid,
         address: 'Coppice Names REVEAL',
         addressType: 'unified',
-        amountZatoshi: BigInt.one,
+        amountZatoshi: BigInt.from(kNamesBondZatoshis),
         feeZatoshi: proposal.feeZatoshi,
         needsSaplingParams: false,
         memo: 'Reveal ${name.trim().toLowerCase()}',
+        cancelLocation: '/names',
+        completionLocation: '/names',
       );
     } catch (error) {
       log('Names: REVEAL proposal failed: $error');
@@ -490,6 +497,79 @@ class ManagedNamesNotifier
     }
   }
 
+  /// Builds a reviewed UPDATE, RENEW, or RELEASE capability without
+  /// broadcasting it. The shared send review/status flow owns the proposal
+  /// after this returns.
+  Future<SendReviewArgs?> beginManagement(
+    String name,
+    String action, {
+    String? paymentAddress,
+  }) async {
+    _lastManagementError = null;
+    final account = ref.read(accountProvider).value;
+    final accountUuid = account?.activeAccountUuid;
+    if (accountUuid == null) {
+      _lastManagementError = 'Unlock your wallet first.';
+      return null;
+    }
+    final accountNotifier = ref.read(accountProvider.notifier);
+    if (accountNotifier.isHardwareAccount(accountUuid)) {
+      _lastManagementError =
+          'Names management currently requires a software account.';
+      return null;
+    }
+    final mnemonicBytes = await accountNotifier.getMnemonicBytesForAccount(
+      accountUuid,
+    );
+    if (mnemonicBytes == null || mnemonicBytes.isEmpty) {
+      _lastManagementError = 'The selected account credential is unavailable.';
+      return null;
+    }
+    final endpoint = ref.read(rpcEndpointProvider);
+    final sendFlowId = newSendFlowId();
+    try {
+      late final Future<rust_names.ApiNamesRevealProposal> proposalFuture;
+      try {
+        proposalFuture = rust_names.beginNamesManagement(
+          dbPath: await getWalletDbPath(),
+          lightwalletdUrl: endpoint.normalizedLightwalletdUrl,
+          network: endpoint.networkName,
+          accountUuid: accountUuid,
+          sendFlowId: sendFlowId,
+          name: name,
+          action: action,
+          paymentAddress: paymentAddress,
+          mnemonicBytes: mnemonicBytes,
+        );
+      } finally {
+        mnemonicBytes.fillRange(0, mnemonicBytes.length, 0);
+      }
+      final proposal = await proposalFuture;
+      final canonicalName = name.trim().toLowerCase();
+      final operation = action.trim().toUpperCase();
+      return SendReviewArgs(
+        proposalId: proposal.proposalId,
+        sendFlowId: sendFlowId,
+        proposalAccountUuid: accountUuid,
+        address: 'Coppice Names $operation',
+        addressType: 'unified',
+        amountZatoshi: BigInt.from(kNamesBondZatoshis),
+        feeZatoshi: proposal.feeZatoshi,
+        needsSaplingParams: false,
+        memo: '${_managementVerb(action)} $canonicalName',
+        cancelLocation: '/names',
+        completionLocation: '/names',
+      );
+    } catch (error) {
+      log('Names: $action proposal failed: $error');
+      _lastManagementError = _friendlyRegistrationError(error);
+      return null;
+    }
+  }
+
+  /// Direct execution retained for the live protocol qualification harness.
+  /// Interactive wallet UI must use [beginManagement] so the user reviews and
+  /// authorizes the transaction through the shared send flow.
   Future<String?> manage(
     String name,
     String action, {
@@ -529,11 +609,18 @@ class ManagedNamesNotifier
       if (ref.mounted) ref.invalidateSelf();
       return null;
     } catch (error) {
-      log('Names: $action failed: $error');
+      log('Names qualification: $action failed: $error');
       return _friendlyRegistrationError(error);
     }
   }
 }
+
+String _managementVerb(String action) => switch (action) {
+  'update' => 'Update',
+  'renew' => 'Renew',
+  'release' => 'Release',
+  _ => 'Manage',
+};
 
 class NamesStatusNotifier
     extends AsyncNotifier<rust_names.ApiNamesWalletStatus?> {
@@ -602,6 +689,21 @@ class NamesStatusNotifier
       if (!ref.mounted) return;
       action.succeed();
       state = AsyncData(status);
+      try {
+        await ref.read(managedNamesProvider.notifier).refresh();
+        if (!ref.mounted) return;
+        final registration = ref.read(namesRegistrationProvider.notifier);
+        await registration.refreshBondStatus();
+        if (!ref.mounted) return;
+        await registration.refreshDraftPhase();
+        if (!ref.mounted) return;
+        await ref.read(syncProvider.notifier).refreshAfterNamesStateChange();
+      } catch (error) {
+        // Names is already bootstrapped. A later wallet sync will retry this
+        // presentation-only refresh, so do not report bootstrap as failed or
+        // invite the user to replay it.
+        log('Names: post-bootstrap wallet refresh failed: $error');
+      }
     } catch (error) {
       log('Names: bootstrap failed: $error');
       if (!ref.mounted) return;

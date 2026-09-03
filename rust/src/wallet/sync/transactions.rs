@@ -140,10 +140,17 @@ pub(crate) fn get_wallet_balances(
             .collect());
     };
 
+    let chain_tip_height = u32::from(summary.chain_tip_height());
+    let names_locked = account_uuids
+        .iter()
+        .map(|account_uuid| names_locked_zatoshi(db_path, network, account_uuid, chain_tip_height))
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok(target_ids
         .iter()
+        .zip(names_locked)
         .map(
-            |target_id| match summary.account_balances().get(target_id) {
+            |(target_id, names_locked)| match summary.account_balances().get(target_id) {
                 Some(b) => {
                     let transparent_change =
                         u64::from(b.unshielded_balance().change_pending_confirmation());
@@ -171,7 +178,8 @@ pub(crate) fn get_wallet_balances(
                         transparent_locked: u64::from(b.unshielded_balance().locked_value()),
                         sapling_locked: u64::from(b.sapling_balance().locked_value()),
                         orchard_locked: u64::from(b.orchard_balance().locked_value()),
-                        ironwood_locked: u64::from(b.ironwood_balance().locked_value()),
+                        ironwood_locked: u64::from(b.ironwood_balance().locked_value())
+                            .saturating_add(names_locked),
                         transparent_pending: transparent_change + transparent_pending,
                         sapling_pending: sapling_change + sapling_pending,
                         orchard_pending: orchard_change + orchard_pending,
@@ -194,6 +202,58 @@ pub(crate) fn get_wallet_balances(
             },
         )
         .collect())
+}
+
+fn names_locked_zatoshi(
+    db_path: &str,
+    network: WalletNetwork,
+    account_uuid: &str,
+    chain_tip_height: u32,
+) -> Result<u64, String> {
+    let mut bonded = crate::wallet::coppice::bonded_names(db_path, network, account_uuid)?;
+    if bonded.is_empty() {
+        return Ok(0);
+    }
+
+    // A pending RELEASE creates a wallet-owned return output for the same
+    // value. While that transaction is unmined, count the pending output and
+    // omit the still-canonical hidden bond so total holdings never double.
+    let release_activities = crate::wallet::coppice::names_activities(db_path, account_uuid)?
+        .into_iter()
+        .filter(|activity| activity.action == "release")
+        .collect::<Vec<_>>();
+    if !release_activities.is_empty() {
+        let conn = open_readonly_conn(db_path)?;
+        bonded.retain(|name| {
+            !release_activities.iter().any(|activity| {
+                if activity.name != *name {
+                    return false;
+                }
+                let mut reversed = activity.txid;
+                reversed.reverse();
+                let status = conn
+                    .query_row(
+                        "SELECT mined_height, expiry_height
+                         FROM transactions
+                         WHERE txid = ?1 OR txid = ?2
+                         LIMIT 1",
+                        rusqlite::params![activity.txid.as_slice(), reversed.as_slice()],
+                        |row| Ok((row.get::<_, Option<u32>>(0)?, row.get::<_, Option<u32>>(1)?)),
+                    )
+                    .optional();
+                matches!(
+                    status,
+                    Ok(Some((None, expiry)))
+                        if expiry.is_none_or(|height| height == 0 || height > chain_tip_height)
+                )
+            })
+        });
+    }
+
+    u64::try_from(bonded.len())
+        .unwrap_or(u64::MAX)
+        .checked_mul(coppice_names_wallet::REQUIRED_BOND_ZATOSHIS)
+        .ok_or_else(|| "Names locked balance overflow".to_string())
 }
 
 // ======================== Diversified Address ========================
@@ -615,11 +675,21 @@ pub(crate) fn get_transaction_history(
     )?;
     drop(read_tx);
 
-    Ok(assemble_history(
+    let mut names_by_txid = HashMap::new();
+    for activity in crate::wallet::coppice::names_activities(db_path, account_uuid)? {
+        let kind = format!("names_{}:{}", activity.action, activity.name);
+        names_by_txid.insert(activity.txid.to_vec(), kind.clone());
+        let mut reversed = activity.txid.to_vec();
+        reversed.reverse();
+        names_by_txid.insert(reversed, kind);
+    }
+
+    Ok(assemble_history_with_names(
         &bases,
         &outputs_by_txid,
         &uuid_bytes,
         limit,
+        &names_by_txid,
     ))
 }
 
@@ -634,11 +704,22 @@ pub(crate) fn get_transaction_history(
 /// check rather than by synthetic in-memory tables, which cannot
 /// express states the real schema forbids (a spend, for instance,
 /// always implies a funding receive that is itself a history row).
+#[cfg(test)]
 fn assemble_history(
     bases: &[TxBase],
     outputs_by_txid: &HashMap<Vec<u8>, Vec<TxOutput>>,
     uuid_bytes: &[u8],
     limit: Option<u32>,
+) -> Vec<TransactionInfo> {
+    assemble_history_with_names(bases, outputs_by_txid, uuid_bytes, limit, &HashMap::new())
+}
+
+fn assemble_history_with_names(
+    bases: &[TxBase],
+    outputs_by_txid: &HashMap<Vec<u8>, Vec<TxOutput>>,
+    uuid_bytes: &[u8],
+    limit: Option<u32>,
+    names_by_txid: &HashMap<Vec<u8>, String>,
 ) -> Vec<TransactionInfo> {
     let summaries: HashMap<Vec<u8>, ActivitySummary> = bases
         .iter()
@@ -659,6 +740,17 @@ fn assemble_history(
 
     let mut visible = Vec::new();
     for base in bases {
+        if let Some(kind) = names_by_txid.get(&base.txid) {
+            visible.push(build_classified_tx(
+                base,
+                kind,
+                coppice_names_wallet::REQUIRED_BOND_ZATOSHIS,
+                "ironwood",
+                false,
+                0,
+            ));
+            continue;
+        }
         let summary = summaries.get(&base.txid).cloned().unwrap_or_default();
         if suppressed_funding_step_fees
             .suppressed_funding_txids
@@ -2226,6 +2318,22 @@ mod tests {
         assert_eq!(rows[0].info.tx_kind, "migration");
         assert_eq!(rows[0].info.display_amount, 624_980_000);
         assert_eq!(rows[0].info.display_pool, "ironwood");
+    }
+
+    #[test]
+    fn names_activity_metadata_overrides_generic_self_receive_classification() {
+        let base = tx_base_for_history();
+        let names_by_txid = HashMap::from([(base.txid.clone(), "names_release:111".to_string())]);
+
+        let rows = assemble_history_with_names(&[base], &HashMap::new(), &[], None, &names_by_txid);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_kind, "names_release:111");
+        assert_eq!(
+            rows[0].display_amount,
+            coppice_names_wallet::REQUIRED_BOND_ZATOSHIS
+        );
+        assert_eq!(rows[0].display_pool, "ironwood");
     }
 
     #[test]

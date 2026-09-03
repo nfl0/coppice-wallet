@@ -51,7 +51,7 @@ class _ReviewManagedNamesNotifier extends ManagedNamesNotifier {
     proposalAccountUuid: 'software-account',
     address: 'Coppice Names REVEAL',
     addressType: 'unified',
-    amountZatoshi: BigInt.one,
+    amountZatoshi: BigInt.from(kNamesBondZatoshis),
     feeZatoshi: BigInt.from(1234),
     needsSaplingParams: false,
     memo: 'Reveal ${name.trim().toLowerCase()}',
@@ -79,6 +79,56 @@ class _WaitingManagedNamesNotifier extends ManagedNamesNotifier {
       refreshWindowOpen: false,
     ),
   ];
+}
+
+class _ReviewManagementNotifier extends ManagedNamesNotifier {
+  static String? capturedAction;
+  static String? capturedAddress;
+
+  @override
+  Future<List<rust_names.ApiManagedName>> build() async => [
+    rust_names.ApiManagedName(
+      name: 'managed',
+      paymentAddress: 'uregtest1old',
+      phase: 'active',
+      commitment: Uint8List.fromList([1, 2, 3]),
+      commitWindowStart: BigInt.zero,
+      commitWindowEnd: BigInt.zero,
+      commitBlocksUntil: BigInt.zero,
+      commitWindowOpen: false,
+      revealWindowStart: BigInt.zero,
+      revealWindowEnd: BigInt.zero,
+      revealBlocksUntil: BigInt.zero,
+      revealWindowOpen: false,
+      refreshWindowStart: BigInt.from(100),
+      refreshWindowEnd: BigInt.from(104),
+      refreshBlocksUntil: BigInt.zero,
+      refreshWindowOpen: true,
+    ),
+  ];
+
+  @override
+  Future<SendReviewArgs?> beginManagement(
+    String name,
+    String action, {
+    String? paymentAddress,
+  }) async {
+    capturedAction = action;
+    capturedAddress = paymentAddress;
+    return SendReviewArgs(
+      proposalId: BigInt.from(77),
+      sendFlowId: 'names-management-review',
+      proposalAccountUuid: 'software-account',
+      address: 'Coppice Names ${action.toUpperCase()}',
+      addressType: 'unified',
+      amountZatoshi: BigInt.from(kNamesBondZatoshis),
+      feeZatoshi: BigInt.from(5678),
+      needsSaplingParams: false,
+      memo: '${action.toUpperCase()} $name',
+      cancelLocation: '/names',
+      completionLocation: '/names',
+    );
+  }
 }
 
 class _EmptyAccountNotifier extends AccountNotifier {
@@ -179,7 +229,7 @@ void main() {
 
     expect(captured?.address, 'Coppice Names REVEAL');
     expect(captured?.feeZatoshi, BigInt.from(1234));
-    expect(captured?.amountZatoshi, BigInt.one);
+    expect(captured?.amountZatoshi, BigInt.from(kNamesBondZatoshis));
     expect(captured?.memo, 'Reveal reviewable');
     expect(
       find.text('Coppice Names REVEAL|1234|Reveal reviewable'),
@@ -218,6 +268,89 @@ void main() {
       findsNothing,
     );
   });
+
+  for (final action in ['update', 'renew', 'release']) {
+    testWidgets('$action management enters shared transaction review', (
+      tester,
+    ) async {
+      _ReviewManagementNotifier.capturedAction = null;
+      _ReviewManagementNotifier.capturedAddress = null;
+      SendReviewArgs? captured;
+      final router = GoRouter(
+        initialLocation: '/names',
+        routes: [
+          GoRoute(
+            path: '/names',
+            builder: (_, _) => const Scaffold(
+              body: AppTheme(
+                data: AppThemeData.light,
+                child: NamesView(showDesktopChrome: false),
+              ),
+            ),
+          ),
+          GoRoute(
+            path: '/send/review',
+            builder: (_, state) {
+              captured = state.extra as SendReviewArgs;
+              return Text('review:${captured!.address}');
+            },
+          ),
+        ],
+      );
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            namesDeploymentProfileProvider.overrideWithValue(
+              kLocalRegtestNamesDeploymentProfile,
+            ),
+            namesStatusProvider.overrideWith(() => _ReadyNamesStatusNotifier()),
+            managedNamesProvider.overrideWith(_ReviewManagementNotifier.new),
+          ],
+          child: MaterialApp.router(routerConfig: router),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.ensureVisible(find.byTooltip('Manage managed.zec'));
+      await tester.tap(find.byTooltip('Manage managed.zec'));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.text(switch (action) {
+          'update' => 'Update address',
+          'renew' => 'Renew lease',
+          _ => 'Release name',
+        }),
+      );
+      await tester.pumpAndSettle();
+
+      if (action == 'update') {
+        await tester.enterText(
+          find.widgetWithText(TextFormField, 'New payment address'),
+          'uregtest1new',
+        );
+        await tester.tap(find.text('Update').last);
+        await tester.pumpAndSettle();
+      } else if (action == 'release') {
+        await tester.tap(find.text('Release').last);
+        await tester.pumpAndSettle();
+      }
+
+      expect(_ReviewManagementNotifier.capturedAction, action);
+      expect(
+        _ReviewManagementNotifier.capturedAddress,
+        action == 'update' ? 'uregtest1new' : isNull,
+      );
+      expect(captured?.amountZatoshi, BigInt.from(kNamesBondZatoshis));
+      expect(captured?.cancelLocation, '/names');
+      expect(captured?.completionLocation, '/names');
+      expect(
+        find.text('review:Coppice Names ${action.toUpperCase()}'),
+        findsOneWidget,
+      );
+    });
+  }
 }
 
 class _ReadyNamesStatusNotifier extends NamesStatusNotifier {

@@ -142,7 +142,33 @@ Future<Uint8List> revealNamesRegistration({
   mnemonicBytes: mnemonicBytes,
 );
 
+/// Builds a current-head Names transition for the shared wallet review flow.
+/// Construction reserves any fee input, but nothing is broadcast here.
+Future<ApiNamesRevealProposal> beginNamesManagement({
+  required String dbPath,
+  required String lightwalletdUrl,
+  required String network,
+  required String accountUuid,
+  required String sendFlowId,
+  required String name,
+  required String action,
+  String? paymentAddress,
+  required List<int> mnemonicBytes,
+}) => RustLib.instance.api.crateApiNamesBeginNamesManagement(
+  dbPath: dbPath,
+  lightwalletdUrl: lightwalletdUrl,
+  network: network,
+  accountUuid: accountUuid,
+  sendFlowId: sendFlowId,
+  name: name,
+  action: action,
+  paymentAddress: paymentAddress,
+  mnemonicBytes: mnemonicBytes,
+);
+
 /// Proves and broadcasts one canonical current-head transition.
+/// Retained for non-UI qualification callers; wallet UI must use
+/// `begin_names_management` and the shared review flow.
 Future<Uint8List> manageName({
   required String dbPath,
   required String lightwalletdUrl,
@@ -418,7 +444,7 @@ class ApiNamesResolution {
           compactBlocksScanned == other.compactBlocksScanned;
 }
 
-/// Reviewed REVEAL proposal backed by an atomically consumed Rust capability.
+/// Reviewed Names proposal backed by an atomically consumed Rust capability.
 class ApiNamesRevealProposal {
   final BigInt proposalId;
   final BigInt feeZatoshi;

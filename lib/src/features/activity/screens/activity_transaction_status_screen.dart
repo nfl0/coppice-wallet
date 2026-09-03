@@ -30,6 +30,8 @@ import '../../address_book/providers/address_book_provider.dart';
 import '../../send/widgets/send_recipient_resolver.dart';
 import '../../send/widgets/send_status_content_view.dart';
 import '../../send/widgets/send_verify_address_overlay.dart';
+import '../activity_row_mapper.dart'
+    show isNamesActivityKind, namesActivityTitle;
 import '../widgets/received_receipt_view.dart';
 import '../widgets/shielded_receipt_view.dart';
 
@@ -505,6 +507,7 @@ class _ActivityTransactionStatusScreenState
     }
 
     final isMigration = tx.txKind == 'migration';
+    final isNames = isNamesActivityKind(tx.txKind);
     final (statusValue, statusIconName, statusColor) = tx.expiredUnmined
         ? ('Failed', AppIcons.cancel, colors.text.destructive)
         : tx.minedHeight == BigInt.zero
@@ -520,7 +523,14 @@ class _ActivityTransactionStatusScreenState
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            isMigration
+            isNames
+                ? namesActivityTitle(
+                    tx.txKind,
+                    isPending:
+                        tx.minedHeight == BigInt.zero && !tx.expiredUnmined,
+                    isFailed: tx.expiredUnmined,
+                  )
+                : isMigration
                 ? tx.expiredUnmined
                       ? 'Migration failed'
                       : tx.minedHeight == BigInt.zero
@@ -537,7 +547,11 @@ class _ActivityTransactionStatusScreenState
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
             child: ReviewInfoRow(
-              label: isMigration ? 'Amount migrated' : 'Amount',
+              label: isMigration
+                  ? 'Amount migrated'
+                  : isNames
+                  ? 'Bond'
+                  : 'Amount',
               value: _amountText(tx, privacyModeEnabled: privacyModeEnabled),
               leading: ClipOval(
                 child: Image.asset(

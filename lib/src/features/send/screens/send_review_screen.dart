@@ -123,7 +123,7 @@ class _SendReviewScreenState extends ConsumerState<SendReviewScreen> {
   void _handleCancel() {
     _scheduleDiscard();
     if (!mounted) return;
-    context.go('/send');
+    context.go(widget.args.cancelLocation);
   }
 
   void _showKeystoneSigningModal() {
@@ -283,7 +283,7 @@ class _SendReviewScreenState extends ConsumerState<SendReviewScreen> {
   Future<void> _cancelKeystoneSigning() async {
     _scheduleDiscard();
     if (!mounted) return;
-    context.go('/send');
+    context.go(widget.args.cancelLocation);
   }
 
   Future<void> _getKeystoneSignature() async {

@@ -1080,7 +1080,7 @@ pub fn execute_proposal(
 ) -> Result<ExecuteProposalResult, String> {
     catch(|| {
         let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
-        if let Some(result) = rt.block_on(wallet_sync::try_execute_names_reveal_proposal(
+        if let Some(result) = rt.block_on(wallet_sync::try_execute_names_transaction_proposal(
             &db_path,
             &lightwalletd_url,
             proposal_id,
@@ -1145,7 +1145,7 @@ pub fn execute_proposal_with_macos_stored_mnemonic(
 ) -> Result<ExecuteProposalResult, String> {
     catch(|| {
         let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
-        if let Some(result) = rt.block_on(wallet_sync::try_execute_names_reveal_proposal(
+        if let Some(result) = rt.block_on(wallet_sync::try_execute_names_transaction_proposal(
             &db_path,
             &lightwalletd_url,
             proposal_id,

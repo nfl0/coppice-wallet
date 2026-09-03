@@ -26,7 +26,7 @@ void main() {
   setUpAll(initializeZcashWalletRuntime);
 
   testWidgets(
-    'registers a name through the desktop UI with manual REVEAL',
+    'registers and manages a name across a canonical tip reorg',
     (tester) async {
       final name = 'walletgui${DateTime.now().millisecondsSinceEpoch}';
       if (kZcashDefaultNetworkName != ZcashNetwork.regtest.name) {
@@ -234,13 +234,59 @@ void main() {
         isNot(base64.encode(beforeRefresh.producerTxid!)),
       );
 
+      // Reorg away the block that accepted REFRESH. Zakura does not return the
+      // invalidated transaction to its mempool, so the empty replacement block
+      // must restore the pre-REFRESH hidden state and its managed witness.
+      // RELEASE below then proves that restored witness is usable.
+      final reorg = await _reorgTipAndMineReplacement();
+      await _syncToHeight(tester, reorg.height);
+      final afterReorg = await _resolveRaw(name);
+      expect(afterReorg.status, 'active');
+      expect(
+        base64.encode(afterReorg.producerTxid!),
+        base64.encode(beforeRefresh.producerTxid!),
+      );
+
+      // The current Zaino test stack drops its backing JSON-RPC connection
+      // after Zakura's explicit fork. Restart only Zaino: restarting Zakura
+      // also restores the intentionally invalidated REFRESH to its mempool.
+      // Then prove the wallet reconnects and can spend the restored witness.
+      await _restartRetainedZaino();
+      expect(
+        await _rpc('getblockhash', [reorg.height]),
+        reorg.hash,
+        reason: 'the retained stack must restart on the replacement branch',
+      );
+      final stabilizedHeight = await _mine(1);
+      await _syncToHeight(tester, stabilizedHeight);
+      expect(
+        await _rpc('getrawmempool', const []),
+        isEmpty,
+        reason: 'the stabilization block must drain pre-RELEASE transactions',
+      );
+
       final releaseError = await container
           .read(managedNamesProvider.notifier)
           .manage(name, 'release');
       expect(releaseError, isNull);
+      final releaseMempool =
+          await _rpc('getrawmempool', const []) as List<dynamic>;
+      expect(releaseMempool, hasLength(1));
+      final releaseTxid = releaseMempool.single as String;
       final releaseHeight = await _mine(1);
+      final blockHash = await _rpc('getblockhash', [releaseHeight]) as String;
+      final block =
+          await _rpc('getblock', [blockHash, 1]) as Map<String, dynamic>;
+      expect(
+        block['tx'] as List<dynamic>,
+        contains(releaseTxid),
+        reason: 'the acknowledged RELEASE must be canonical',
+      );
       await _syncToHeight(tester, releaseHeight);
       final afterRelease = await _resolveRaw(name);
+      await _invalidateNamesCheckpoint();
+      final afterReleaseReplay = await _resolveRaw(name);
+      expect(afterReleaseReplay.status, afterRelease.status);
       expect(afterRelease.status, 'cooldown');
     },
     timeout: const Timeout(Duration(minutes: 45)),
@@ -416,6 +462,26 @@ Future<int> _mine(int count) async {
   await _rpc('generate', [count]);
   final height = await _rpc('getblockcount', const []);
   return height as int;
+}
+
+Future<({int height, String hash})> _reorgTipAndMineReplacement() async {
+  final oldHeight = await _rpc('getblockcount', const []) as int;
+  final oldHash = await _rpc('getbestblockhash', const []) as String;
+  await _rpc('invalidateblock', [oldHash]);
+  final mempool = await _rpc('getrawmempool', const []) as List<dynamic>;
+  expect(mempool, isEmpty);
+  await _mine(1);
+  final newHeight = await _rpc('getblockcount', const []) as int;
+  final newHash = await _rpc('getbestblockhash', const []) as String;
+  expect(newHeight, oldHeight);
+  expect(newHash, isNot(oldHash));
+  return (height: newHeight, hash: newHash);
+}
+
+Future<void> _restartRetainedZaino() async {
+  final script = File('../regtest-dev/regtest-dev.sh').absolute.path;
+  final restart = await Process.run(script, const ['restart-zaino']);
+  expect(restart.exitCode, 0, reason: '${restart.stdout}\n${restart.stderr}');
 }
 
 Future<Object?> _rpc(String method, List<Object?> params) async {
