@@ -14,8 +14,8 @@ flutter_rust_bridge = "=2.11.1"
 # a standalone checkout instead of depending on a particular sibling layout.
 coppice = { git = "https://github.com/nfl0/coppice.git", rev = "a2db56c03bdd77ca84c6eab00302f2d6eb709353" }
 coppice-librustzcash = { git = "https://github.com/nfl0/coppice.git", rev = "a2db56c03bdd77ca84c6eab00302f2d6eb709353" }
-coppice-names = { git = "https://github.com/nfl0/coppice-names.git", rev = "25202272254f29a0aa5658f039ea768373fa2287" }
-coppice-names-wallet = { git = "https://github.com/nfl0/coppice-names.git", rev = "25202272254f29a0aa5658f039ea768373fa2287" }
+coppice-names = { git = "https://github.com/nfl0/coppice-names.git", rev = "a7afa7c12d88d31d9deaafe7fa7fef28d691fcff" }
+coppice-names-wallet = { git = "https://github.com/nfl0/coppice-names.git", rev = "a7afa7c12d88d31d9deaafe7fa7fef28d691fcff" }
 
 zcash_script = "0.4.3"
 voting-crypto-deps = { version = "=0.2.2" }
@@ -139,7 +139,7 @@ version = "=1.0.0"
 # Coppice Core, and Names share one Orchard type family.
 
 [patch.crates-io]
-zakura-orchard = { git = "https://github.com/nfl0/orchard-coppice.git", rev = "51c374d9d36ac1728b00d8978456d7d98a232d82" }
+zakura-orchard = { git = "https://github.com/nfl0/orchard-coppice.git", rev = "e702d0525d5086d41b66ab870ede0a94b05fdcae" }
 
 [dependencies.zcash_proofs]
 package = "zakura-proofs"

@@ -961,7 +961,7 @@ dependencies = [
 [[package]]
 name = "coppice-names"
 version = "0.1.0"
-source = "git+https://github.com/nfl0/coppice-names.git?rev=25202272254f29a0aa5658f039ea768373fa2287#25202272254f29a0aa5658f039ea768373fa2287"
+source = "git+https://github.com/nfl0/coppice-names.git?rev=a7afa7c12d88d31d9deaafe7fa7fef28d691fcff#a7afa7c12d88d31d9deaafe7fa7fef28d691fcff"
 dependencies = [
  "blake2b_simd",
  "coppice",
@@ -978,7 +978,7 @@ dependencies = [
 [[package]]
 name = "coppice-names-wallet"
 version = "0.1.0"
-source = "git+https://github.com/nfl0/coppice-names.git?rev=25202272254f29a0aa5658f039ea768373fa2287#25202272254f29a0aa5658f039ea768373fa2287"
+source = "git+https://github.com/nfl0/coppice-names.git?rev=a7afa7c12d88d31d9deaafe7fa7fef28d691fcff#a7afa7c12d88d31d9deaafe7fa7fef28d691fcff"
 dependencies = [
  "anyhow",
  "blake2b_simd",
@@ -7754,7 +7754,7 @@ dependencies = [
 [[package]]
 name = "zakura-orchard"
 version = "1.0.0"
-source = "git+https://github.com/nfl0/orchard-coppice.git?rev=51c374d9d36ac1728b00d8978456d7d98a232d82#51c374d9d36ac1728b00d8978456d7d98a232d82"
+source = "git+https://github.com/nfl0/orchard-coppice.git?rev=e702d0525d5086d41b66ab870ede0a94b05fdcae#e702d0525d5086d41b66ab870ede0a94b05fdcae"
 dependencies = [
  "aes",
  "bitvec",
