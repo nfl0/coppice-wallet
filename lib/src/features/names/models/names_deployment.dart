@@ -58,7 +58,7 @@ const kLocalRegtestNamesDeploymentProfile = NamesDeploymentProfile(
   leaseBlocks: 128,
   cooldownBlocks: 32,
   retentionBlocks: 128,
-  networkDomain: 'coppice-runtime-regtest-v1',
+  networkDomain: 'coppice-runtime-regtest',
   rendezvousIvkHex:
       '65deb2b3ee7ac69020543f40f21122cb6dc1f4201a329fcdf9d5e3bb2dfbbabe'
       '29d542352fe36c3c7b24c2989dc9d0000b9e04f444e05dc4538bde395c0e6008',

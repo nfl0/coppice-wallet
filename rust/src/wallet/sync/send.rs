@@ -776,7 +776,7 @@ pub(crate) fn propose_send(
     )
 }
 
-/// Names carriers require arbitrary 512-byte CPV1 memo frames rather than a
+/// Names carriers require arbitrary 512-byte CPCF memo frames rather than a
 /// UTF-8 user memo. This shares the ordinary proposal, input-lock, fee and
 /// execution path so the application cannot bypass wallet policy.
 pub(crate) fn propose_send_with_raw_memo(

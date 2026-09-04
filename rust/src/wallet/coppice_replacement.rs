@@ -58,7 +58,7 @@ const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ACQUIRED_FULL_TRANSACTION_BYTES: usize = 64 * 1024 * 1024;
 const ACQUISITION_BATCH_BLOCKS: u32 = 2_000;
 const REGTEST_ACTIVATION_HEIGHT: u32 = 2;
-const REGTEST_NETWORK_DOMAIN: &str = "coppice-runtime-regtest-v1";
+const REGTEST_NETWORK_DOMAIN: &str = "coppice-runtime-regtest";
 const REGTEST_RENDEZVOUS_IVK_HEX: &str = "65deb2b3ee7ac69020543f40f21122cb6dc1f4201a329fcdf9d5e3bb2dfbbabe29d542352fe36c3c7b24c2989dc9d0000b9e04f444e05dc4538bde395c0e6008";
 const REGTEST_RENDEZVOUS_RECEIVER_HEX: &str =
     "9ec59e4d447ba285086cc3456cadf62004a19b6a7989c726daaa9944a6cdbf25f7bfa51afa15b66da53881";
@@ -239,12 +239,9 @@ impl NamesWalletConfig {
             return Err("Names configuration belongs to a different wallet network".into());
         }
         CoreRuntimeParameters {
-            runtime_protocol_id: b"coppice.runtime".to_vec(),
-            runtime_protocol_version: 1,
             zcash_network_domain: self.network_domain.clone(),
             zcash_network: core_network(network),
             runtime_activation_height: self.activation_height,
-            carrier_protocol_id: b"CPV1".to_vec(),
             rendezvous_ivk: self
                 .rendezvous_ivk
                 .clone()

@@ -34,7 +34,7 @@ void main() {
       expect(profile.leaseBlocks, 128);
       expect(profile.cooldownBlocks, 32);
       expect(profile.retentionBlocks, 128);
-      expect(profile.networkDomain, 'coppice-runtime-regtest-v1');
+      expect(profile.networkDomain, 'coppice-runtime-regtest');
       expect(profile.rendezvousIvkHex.length, 128);
       expect(profile.rendezvousReceiverHex.length, 86);
     },

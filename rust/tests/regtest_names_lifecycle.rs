@@ -110,7 +110,7 @@ fn names_commit_reveal_live() {
         1024,
         1,
         128,
-        "coppice-runtime-regtest-v1".to_string(),
+        "coppice-runtime-regtest".to_string(),
         REGTEST_IVK.to_string(),
         REGTEST_RECEIVER.to_string(),
     )
