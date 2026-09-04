@@ -1350,7 +1350,6 @@ String _managedPhaseLabel(String phase) => switch (phase) {
   'reveal_broadcast' => 'REVEAL broadcast — awaiting confirmation',
   'active' => 'Active',
   'cooldown' => 'Cooldown — registration temporarily unavailable',
-  'claimable' => 'Available to register',
   _ => phase.replaceAll('_', ' '),
 };
 

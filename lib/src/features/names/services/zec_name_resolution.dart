@@ -110,7 +110,7 @@ String? zecNameLabelValidationError(String input) {
 /// through the wallet's authenticated exact resolver against the active endpoint.
 ///
 /// Only an `active` lease passes — the payment flow must not send to a
-/// cooldown, claimable, or missing name. Every other
+/// cooldown or missing name. Every other
 /// outcome throws [ZecNameResolutionException] with a user-facing message.
 Future<ZecNameResolution> resolveZecNameInput(
   String input, {
@@ -161,11 +161,6 @@ ZecNameResolution zecNameResolutionFromApi(
     case 'cooldown':
       throw ZecNameResolutionException(
         '`$name` is in cooldown and cannot be registered by anyone yet',
-        status: resolution.status,
-      );
-    case 'claimable':
-      throw ZecNameResolutionException(
-        '`$name` is available to register',
         status: resolution.status,
       );
     case 'missing':

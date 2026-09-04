@@ -59,8 +59,8 @@ pub struct ApiManagedName {
     pub name: String,
     pub payment_address: Option<String>,
     /// Presentation phase after reconciling the durable wallet workflow with
-    /// the accepted public lifecycle. An unfinished replacement workflow has
-    /// priority over the old claimable head it is replacing.
+    /// the accepted public lifecycle. A replacement workflow remains visible
+    /// while the compacted name has no accepted head.
     pub phase: String,
     /// Durable wallet-local registration workflow phase. This must not be
     /// overwritten by the lifecycle of an older accepted head.
@@ -176,23 +176,8 @@ fn lifecycle_label(lifecycle: Lifecycle) -> &'static str {
     match lifecycle {
         Lifecycle::Active => "active",
         Lifecycle::Cooldown => "cooldown",
-        Lifecycle::Claimable => "claimable",
         Lifecycle::Missing => "missing",
     }
-}
-
-fn is_unfinished_registration_phase(phase: &str) -> bool {
-    matches!(
-        phase,
-        "awaiting_bond"
-            | "bond_reserved"
-            | "commit_proposed"
-            | "commit_broadcast"
-            | "commit_accepted"
-            | "window_missed"
-            | "commit_expired"
-            | "reveal_broadcast"
-    )
 }
 
 fn managed_name_phase(
@@ -200,13 +185,8 @@ fn managed_name_phase(
     lifecycle: Option<&str>,
     has_accepted_head: bool,
 ) -> String {
-    // A released/expired claimable head remains in the authenticated resolver
-    // while the wallet starts its replacement registration. During that new
-    // workflow, the actionable local phase must win; otherwise the UI sees
-    // only `claimable` and silently skips bond preparation.
-    if lifecycle == Some("claimable") && is_unfinished_registration_phase(workflow_phase) {
-        return workflow_phase.to_owned();
-    }
+    // A compacted name has no accepted head, so an in-progress replacement's
+    // actionable wallet-local phase remains visible until REVEAL is accepted.
     if has_accepted_head {
         return lifecycle.unwrap_or(workflow_phase).to_owned();
     }
@@ -622,13 +602,13 @@ mod tests {
     use super::managed_name_phase;
 
     #[test]
-    fn claimable_predecessor_does_not_hide_replacement_workflow() {
+    fn missing_name_does_not_hide_replacement_workflow() {
         assert_eq!(
-            managed_name_phase("awaiting_bond", Some("claimable"), true),
+            managed_name_phase("awaiting_bond", Some("missing"), false),
             "awaiting_bond"
         );
         assert_eq!(
-            managed_name_phase("bond_reserved", Some("claimable"), true),
+            managed_name_phase("bond_reserved", Some("missing"), false),
             "bond_reserved"
         );
     }

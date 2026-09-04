@@ -961,7 +961,7 @@ dependencies = [
 [[package]]
 name = "coppice-names"
 version = "0.1.0"
-source = "git+https://github.com/nfl0/coppice-names.git?rev=a7afa7c12d88d31d9deaafe7fa7fef28d691fcff#a7afa7c12d88d31d9deaafe7fa7fef28d691fcff"
+source = "git+https://github.com/nfl0/coppice-names.git?rev=d755f74bb93ba61f582c9401b18661c8e6c62f10#d755f74bb93ba61f582c9401b18661c8e6c62f10"
 dependencies = [
  "blake2b_simd",
  "coppice",
@@ -978,7 +978,7 @@ dependencies = [
 [[package]]
 name = "coppice-names-wallet"
 version = "0.1.0"
-source = "git+https://github.com/nfl0/coppice-names.git?rev=a7afa7c12d88d31d9deaafe7fa7fef28d691fcff#a7afa7c12d88d31d9deaafe7fa7fef28d691fcff"
+source = "git+https://github.com/nfl0/coppice-names.git?rev=d755f74bb93ba61f582c9401b18661c8e6c62f10#d755f74bb93ba61f582c9401b18661c8e6c62f10"
 dependencies = [
  "anyhow",
  "blake2b_simd",

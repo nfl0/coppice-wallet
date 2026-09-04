@@ -115,7 +115,7 @@ void main() {
     });
 
     test('every non-active lifecycle is refused with user-facing text', () {
-      const statuses = ['cooldown', 'claimable', 'missing', 'surprise'];
+      const statuses = ['cooldown', 'missing', 'surprise'];
       for (final status in statuses) {
         expect(
           () => zecNameResolutionFromApi('alice.zec', resolution(status)),

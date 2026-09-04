@@ -571,6 +571,7 @@ impl NamesWalletHost {
                 })?;
                 let head = resolver
                     .resolve(core.tip().height)
+                    .map_err(|error| format!("resolve checkpoint name: {error:?}"))?
                     .head
                     .ok_or_else(|| "checkpoint bond origin has no resolved head".to_string())?;
                 if head.producer_epoch != epoch
@@ -742,13 +743,16 @@ impl NamesWalletHost {
         self.prime_recent_compact_blocks(tail)
     }
 
-    pub(crate) fn managed_resolutions(&self) -> Vec<ManagedResolution> {
+    pub(crate) fn managed_resolutions(&self) -> Result<Vec<ManagedResolution>, String> {
         let height = self.tip_height();
         self.resolvers
             .iter()
             .map(|(name, managed)| {
-                let resolution = managed.resolver.resolve(height);
-                ManagedResolution {
+                let resolution = managed
+                    .resolver
+                    .resolve(height)
+                    .map_err(|error| format!("resolve managed name {name}: {error:?}"))?;
+                Ok(ManagedResolution {
                     name: name.clone(),
                     lifecycle: resolution.lifecycle,
                     marked_position: resolution.head.as_ref().and_then(|head| {
@@ -759,7 +763,7 @@ impl NamesWalletHost {
                     }),
                     bond_origin: managed.bond_origin.clone(),
                     head: resolution.head,
-                }
+                })
             })
             .collect()
     }
@@ -1013,6 +1017,8 @@ impl NamesWalletHost {
                 }
             }
             let resolution = managed.resolver.resolve(block.height);
+            let resolution = resolution
+                .map_err(|error| format!("resolve managed name {canonical_name}: {error:?}"))?;
             let Some(head) = resolution
                 .head
                 .filter(|head| head.producer.height == block.height)
@@ -1487,7 +1493,7 @@ pub(crate) fn bonded_names(
         return Ok(Vec::new());
     };
     let bonded = host
-        .managed_resolutions()
+        .managed_resolutions()?
         .into_iter()
         .filter(|resolution| resolution.marked_position.is_some())
         .map(|resolution| resolution.name)
@@ -1574,7 +1580,7 @@ pub(crate) fn accepted_managed_resolution(
     };
     let canonical = Name::parse(name).map_err(|error| format!("invalid Names label: {error:?}"))?;
     Ok(host
-        .managed_resolutions()
+        .managed_resolutions()?
         .into_iter()
         .find(|resolution| resolution.name == canonical.as_str()))
 }
@@ -1597,14 +1603,14 @@ pub(crate) fn managed_registrations(
 ) -> Result<Vec<ManagedRegistration>, String> {
     let stored = read_stored(&sidecar_path(db_path))?
         .ok_or_else(|| "Names is not configured".to_string())?;
-    let resolutions = host_from_stored(network, &stored)?
-        .map(|host| {
-            host.managed_resolutions()
-                .into_iter()
-                .map(|resolution| (resolution.name.clone(), resolution))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
+    let resolutions = match host_from_stored(network, &stored)? {
+        Some(host) => host
+            .managed_resolutions()?
+            .into_iter()
+            .map(|resolution| (resolution.name.clone(), resolution))
+            .collect::<BTreeMap<_, _>>(),
+        None => BTreeMap::new(),
+    };
     Ok(stored
         .registrations
         .into_iter()
@@ -1950,7 +1956,10 @@ pub(crate) async fn resolve_name(
         .resolvers
         .get(name.as_str())
         .ok_or_else(|| "exact resolver disappeared".to_string())?;
-    let resolution = managed.resolver.resolve(tip_height);
+    let resolution = managed
+        .resolver
+        .resolve(tip_height)
+        .map_err(|error| format!("resolve exact name at {tip_height}: {error:?}"))?;
     let result = NamesResolution {
         status: lifecycle_label(resolution.lifecycle).into(),
         payment_address: resolution.ua.map(|ua| ua.as_str().to_owned()),
@@ -2047,7 +2056,6 @@ fn lifecycle_label(lifecycle: Lifecycle) -> &'static str {
     match lifecycle {
         Lifecycle::Active => "active",
         Lifecycle::Cooldown => "cooldown",
-        Lifecycle::Claimable => "claimable",
         Lifecycle::Missing => "missing",
     }
 }
@@ -2362,16 +2370,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(restored.tip_height(), 1);
-        assert_eq!(restored.managed_resolutions().len(), 2);
+        assert_eq!(restored.managed_resolutions().unwrap().len(), 2);
         assert!(restored
             .managed_resolutions()
+            .unwrap()
             .iter()
             .all(|resolution| resolution.lifecycle == Lifecycle::Missing));
 
         let mut fork = restored.fork();
         fork.resolvers.remove("alice");
-        assert_eq!(fork.managed_resolutions().len(), 1);
-        assert_eq!(restored.managed_resolutions().len(), 2);
+        assert_eq!(fork.managed_resolutions().unwrap().len(), 1);
+        assert_eq!(restored.managed_resolutions().unwrap().len(), 2);
     }
 
     #[test]
@@ -2548,7 +2557,7 @@ mod tests {
         let restored = load_for_sync(db_path, WalletNetwork::Regtest)
             .unwrap()
             .unwrap();
-        assert_eq!(restored.managed_resolutions().len(), 2);
+        assert_eq!(restored.managed_resolutions().unwrap().len(), 2);
     }
 
     #[test]
@@ -2630,7 +2639,7 @@ mod tests {
         let still_authenticated = load_for_sync(db_path, WalletNetwork::Regtest)
             .unwrap()
             .unwrap();
-        assert_eq!(still_authenticated.managed_resolutions().len(), 1);
+        assert_eq!(still_authenticated.managed_resolutions().unwrap().len(), 1);
     }
 
     /// Opt-in smoke for the real local Zakura/Zaino deployment. Lifecycle

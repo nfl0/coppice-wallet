@@ -164,7 +164,7 @@ pub(crate) fn prepare_registration_draft(
     let context = coppice::lifecycle_context(db_path, network)?;
     let name = canonical_registration_name(name)?;
     let existing = coppice::registration(db_path, account_uuid, name.as_str())?;
-    let replace_claimable = if existing.is_some() {
+    let replace_missing = if existing.is_some() {
         let resolution = coppice::accepted_managed_resolution(db_path, network, name.as_str())?
             .ok_or_else(|| "this account already has a workflow for that name".to_string())?;
         match resolution.lifecycle {
@@ -181,7 +181,7 @@ pub(crate) fn prepare_registration_draft(
                     "that name is in protocol cooldown and cannot be registered until height {claimable_height}"
                 ));
             }
-            Lifecycle::Claimable | Lifecycle::Missing => true,
+            Lifecycle::Missing => true,
         }
     } else {
         false
@@ -223,10 +223,10 @@ pub(crate) fn prepare_registration_draft(
         commit_txid: None,
         reveal_txid: None,
     };
-    if replace_claimable {
+    if replace_missing {
         // A released or expired name has no special former-owner priority once
-        // claimable. Reuse the local row only after canonical replay says a
-        // fresh public registration is permitted.
+        // it is Missing. Reuse the local row only after canonical replay says
+        // a fresh public registration is permitted.
         coppice::replace_registration(db_path, registration)?;
     } else {
         coppice::store_registration(db_path, registration)?;
@@ -1143,7 +1143,7 @@ pub(crate) async fn recover_registration(
         Lifecycle::Active | Lifecycle::Cooldown
     ) {
         return Err(match resolution.lifecycle {
-            Lifecycle::Claimable | Lifecycle::Missing => {
+            Lifecycle::Missing => {
                 "the name is not currently owned or in its owner recovery period".into()
             }
             Lifecycle::Active | Lifecycle::Cooldown => unreachable!(),
@@ -1210,7 +1210,7 @@ pub(crate) async fn recover_registration(
             phase: match resolution.lifecycle {
                 Lifecycle::Active => "active",
                 Lifecycle::Cooldown => "cooldown",
-                Lifecycle::Claimable | Lifecycle::Missing => unreachable!(),
+                Lifecycle::Missing => unreachable!(),
             }
             .into(),
             commit_txid: None,

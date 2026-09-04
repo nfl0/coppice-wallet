@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `is_unfinished_registration_phase`, `lifecycle_label`, `managed_name_phase`
+// These functions are ignored because they are not marked as `pub`: `lifecycle_label`, `managed_name_phase`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`
 
 ApiNamesWalletStatus configureNames({
@@ -237,8 +237,8 @@ class ApiManagedName {
   final String? paymentAddress;
 
   /// Presentation phase after reconciling the durable wallet workflow with
-  /// the accepted public lifecycle. An unfinished replacement workflow has
-  /// priority over the old claimable head it is replacing.
+  /// the accepted public lifecycle. A replacement workflow remains visible
+  /// while the compacted name has no accepted head.
   final String phase;
 
   /// Durable wallet-local registration workflow phase. This must not be
