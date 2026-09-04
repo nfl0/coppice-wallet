@@ -926,7 +926,7 @@ dependencies = [
 [[package]]
 name = "coppice"
 version = "0.1.0"
-source = "git+https://github.com/nfl0/coppice.git?rev=eb7e2c926f5deab313a571217857d582c4275082#eb7e2c926f5deab313a571217857d582c4275082"
+source = "git+https://github.com/nfl0/coppice.git?rev=a424c094a1fd802c7760d61c41031961a5a7c5ab#a424c094a1fd802c7760d61c41031961a5a7c5ab"
 dependencies = [
  "coppice-core",
  "zcash_protocol",
@@ -935,7 +935,7 @@ dependencies = [
 [[package]]
 name = "coppice-core"
 version = "0.1.0"
-source = "git+https://github.com/nfl0/coppice.git?rev=eb7e2c926f5deab313a571217857d582c4275082#eb7e2c926f5deab313a571217857d582c4275082"
+source = "git+https://github.com/nfl0/coppice.git?rev=a424c094a1fd802c7760d61c41031961a5a7c5ab#a424c094a1fd802c7760d61c41031961a5a7c5ab"
 dependencies = [
  "blake2b_simd",
  "incrementalmerkletree",
@@ -950,7 +950,7 @@ dependencies = [
 [[package]]
 name = "coppice-librustzcash"
 version = "0.1.0"
-source = "git+https://github.com/nfl0/coppice.git?rev=eb7e2c926f5deab313a571217857d582c4275082#eb7e2c926f5deab313a571217857d582c4275082"
+source = "git+https://github.com/nfl0/coppice.git?rev=a424c094a1fd802c7760d61c41031961a5a7c5ab#a424c094a1fd802c7760d61c41031961a5a7c5ab"
 dependencies = [
  "coppice-core",
  "zakura-client-backend",
@@ -961,7 +961,7 @@ dependencies = [
 [[package]]
 name = "coppice-names"
 version = "0.1.0"
-source = "git+https://github.com/nfl0/coppice-names.git?rev=552a1edc2b47da9f69d724b78cc96f4788b999bd#552a1edc2b47da9f69d724b78cc96f4788b999bd"
+source = "git+https://github.com/nfl0/coppice-names.git?rev=2514f4c4eec2ab7c596d1de93463f06f19c4a0fb#2514f4c4eec2ab7c596d1de93463f06f19c4a0fb"
 dependencies = [
  "blake2b_simd",
  "coppice",
@@ -978,7 +978,7 @@ dependencies = [
 [[package]]
 name = "coppice-names-wallet"
 version = "0.1.0"
-source = "git+https://github.com/nfl0/coppice-names.git?rev=552a1edc2b47da9f69d724b78cc96f4788b999bd#552a1edc2b47da9f69d724b78cc96f4788b999bd"
+source = "git+https://github.com/nfl0/coppice-names.git?rev=2514f4c4eec2ab7c596d1de93463f06f19c4a0fb#2514f4c4eec2ab7c596d1de93463f06f19c4a0fb"
 dependencies = [
  "anyhow",
  "blake2b_simd",
