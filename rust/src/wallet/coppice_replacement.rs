@@ -3,8 +3,10 @@
 //! This is the wallet host for the replacement-only protocol. It keeps Core
 //! application-blind, maintains
 //! one exact resolver per locally managed name, and forks all derived state
-//! before a wallet scan so the caller can commit it only with the accepted
-//! wallet database transaction.
+//! before a wallet scan. Canonical Core checkpoints, indexed Names records,
+//! and rollback journals commit in the wallet's outer SQLite transaction.
+//! The adjacent sidecar remains only for account-private workflow/custody
+//! metadata and a replaceable replay cache.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
@@ -31,14 +33,16 @@ use coppice_names::{
     deployment::DeploymentParameters,
     proof::{keygen, OrchardProofVerifier},
     protocol::{CanonicalUa, FieldElement, Name, NameRoute, Network},
-    reducer::{Head, Lifecycle, ReferencedCommit},
+    reducer::{Head, Lifecycle, ReferencedCommit, StateDelta},
     resolver::ExactResolver,
+    ruleset::ruleset_fingerprint,
     schedule::Parameters as NamesParameters,
     transport::{
         inspect_exact_name_positioned_block, inspect_validated_commit_transaction,
         inspect_validated_name_transaction, positioned_action_position, NamesTransportStatus,
     },
 };
+use coppice_names_sqlite::{Coverage, SqliteNamesStore, StoreIdentity, WalletNamesTransaction};
 use orchard::note_encryption::CompactAction;
 use rand_10::Rng;
 use serde::{Deserialize, Serialize};
@@ -49,7 +53,11 @@ use zcash_client_backend::proto::{
 };
 use zcash_protocol::consensus::BlockHeight;
 
-use super::{network::WalletNetwork, sync_engine};
+use super::{
+    db::{open_wallet_raw_conn_with_timeout, SYNC_DB_BUSY_TIMEOUT},
+    network::WalletNetwork,
+    sync_engine,
+};
 
 const STORE_FORMAT_VERSION: u32 = 2;
 const RUNTIME_CHECKPOINT_FORMAT_VERSION: u32 = 3;
@@ -381,6 +389,7 @@ pub(crate) struct ManagedBlockDelta {
     pub block_start_position: Option<u32>,
     pub leaves: Vec<ManagedLeaf>,
     pub accepted_commits: Vec<([u8; 32], coppice_names::protocol::CommitRef)>,
+    pub state_delta: StateDelta,
 }
 
 impl NamesWalletHost {
@@ -445,6 +454,20 @@ impl NamesWalletHost {
 
     pub(crate) fn fork(&self) -> Self {
         self.clone()
+    }
+
+    pub(crate) fn reducer_tip(&self) -> Result<Option<coppice_names::reducer::ReducerTip>, String> {
+        let mut tips = self
+            .resolvers
+            .values()
+            .map(|managed| managed.resolver.tip());
+        let first = tips
+            .next()
+            .ok_or_else(|| "custody-sensitive Names host has no managed resolvers".to_string())?;
+        if tips.any(|tip| tip != first) {
+            return Err("managed exact resolvers disagree on canonical tip".into());
+        }
+        Ok(first)
     }
 
     /// Stores a branch-bound Core/exact-resolution pair. These bytes remain a
@@ -970,6 +993,7 @@ impl NamesWalletHost {
         let core_parameters = self.config.validated_core_parameters(self.network)?;
         let mut mark_positions = BTreeMap::new();
         let mut accepted_commits = BTreeMap::new();
+        let mut state_delta = None::<StateDelta>;
 
         for (canonical_name, managed) in &mut self.resolvers {
             let name = Name::parse(canonical_name).expect("managed names are canonical");
@@ -988,9 +1012,9 @@ impl NamesWalletHost {
                 }
             }
 
-            managed
+            let outcome = managed
                 .resolver
-                .apply_block_with_referenced_commits(
+                .apply_block_detailed(
                     &block,
                     referenced_commits
                         .get(canonical_name)
@@ -998,6 +1022,35 @@ impl NamesWalletHost {
                         .unwrap_or(&[]),
                 )
                 .map_err(|error| format!("apply exact Names block: {error:?}"))?;
+            match &mut state_delta {
+                None => state_delta = Some(outcome.state_delta),
+                Some(combined) => {
+                    if combined.from_tip != outcome.state_delta.from_tip
+                        || combined.to_tip != outcome.state_delta.to_tip
+                    {
+                        return Err(
+                            "managed exact resolvers produced inconsistent canonical deltas".into(),
+                        );
+                    }
+                    for change in outcome.state_delta.commits {
+                        match combined
+                            .commits
+                            .iter()
+                            .find(|existing| existing.reference == change.reference)
+                        {
+                            Some(existing) if existing != &change => {
+                                return Err(
+                                    "managed exact resolvers disagreed on COMMIT evidence".into()
+                                );
+                            }
+                            Some(_) => {}
+                            None => combined.commits.push(change),
+                        }
+                    }
+                    combined.commits.sort_by_key(|change| change.reference);
+                    combined.heads.extend(outcome.state_delta.heads);
+                }
+            }
             for transaction in &block.transactions {
                 let Some(coppice_names::codec::Operation::Commit { commitment }) =
                     transaction.operation.as_ref()
@@ -1112,11 +1165,14 @@ impl NamesWalletHost {
         if mark_positions.len() != positioned_leaves.iter().filter(|leaf| leaf.mark).count() {
             return Err("managed Names head is absent from the complete block action list".into());
         }
+        let state_delta = state_delta
+            .ok_or_else(|| "custody-sensitive Names host has no managed resolvers".to_string())?;
         Ok(ManagedBlockDelta {
             height: context.height(),
             block_start_position,
             leaves: positioned_leaves,
             accepted_commits: accepted_commits.into_iter().collect(),
+            state_delta,
         })
     }
 }
@@ -1239,6 +1295,42 @@ pub(crate) fn managed_activation_height(
         .ok_or_else(|| "Names is not configured".to_string())?;
     validate_deployed_config(network, &stored.config)?;
     Ok(stored.config.activation_height)
+}
+
+fn transactional_store_identity(
+    network: WalletNetwork,
+    config: &NamesWalletConfig,
+) -> Result<StoreIdentity, String> {
+    let deployment_id = config
+        .deployment(network)?
+        .deployment_id()
+        .map_err(|error| format!("derive Names deployment ID: {error:?}"))?;
+    Ok(StoreIdentity {
+        deployment_id,
+        ruleset_fingerprint: ruleset_fingerprint(),
+        network: config.network(),
+        coverage: Coverage::Owned,
+        minimum_rollback_blocks: config.retention_blocks,
+    })
+}
+
+/// Creates or validates the Names extension schema in the wallet database and
+/// returns its authenticated reducer tip. This runs before the scan connection
+/// is opened, so schema DDL never occurs inside a scan transaction.
+pub(crate) fn initialize_transactional_store(
+    db_path: &str,
+    network: WalletNetwork,
+) -> Result<Option<coppice_names::reducer::ReducerTip>, String> {
+    let stored = read_stored(&sidecar_path(db_path))?
+        .ok_or_else(|| "Names is not configured".to_string())?;
+    validate_deployed_config(network, &stored.config)?;
+    let identity = transactional_store_identity(network, &stored.config)?;
+    let connection = open_wallet_raw_conn_with_timeout(db_path, SYNC_DB_BUSY_TIMEOUT)?;
+    let store = SqliteNamesStore::from_connection_for_wallet(connection, identity)
+        .map_err(|error| format!("initialize Names transactional store: {error:?}"))?;
+    store
+        .tip()
+        .map_err(|error| format!("read Names transactional tip: {error:?}"))
 }
 
 pub(crate) fn configured_names_metadata(
@@ -1626,14 +1718,137 @@ pub(crate) fn load_for_sync(
     db_path: &str,
     network: WalletNetwork,
 ) -> Result<Option<NamesWalletHost>, String> {
-    let Some(stored) = read_stored(&sidecar_path(db_path))? else {
+    let Some(mut stored) = read_stored(&sidecar_path(db_path))? else {
         return Ok(None);
     };
+    validate_deployed_config(network, &stored.config)?;
+    let identity = transactional_store_identity(network, &stored.config)?;
+    let connection = open_wallet_raw_conn_with_timeout(db_path, SYNC_DB_BUSY_TIMEOUT)?;
+    let store = SqliteNamesStore::from_connection_for_wallet(connection, identity)
+        .map_err(|error| format!("open Names transactional store: {error:?}"))?;
+    let store_tip = store
+        .tip()
+        .map_err(|error| format!("read Names transactional tip: {error:?}"))?;
+    let mut recovered = Vec::new();
+    for registration in &mut stored.registrations {
+        if registration.commit_height.is_some() {
+            continue;
+        }
+        let Some(expected_txid) = registration.commit_txid else {
+            continue;
+        };
+        let Some(reference) = store
+            .wallet_commit_observation(registration.commitment)
+            .map_err(|error| format!("read wallet COMMIT observation: {error:?}"))?
+        else {
+            continue;
+        };
+        if reference.txid != expected_txid {
+            return Err("wallet COMMIT observation conflicts with registration txid".into());
+        }
+        registration.commit_height = Some(reference.height);
+        registration.commit_tx_index = Some(reference.tx_index);
+        if registration.reveal_txid.is_none() {
+            registration.phase = "commit_accepted".into();
+        }
+        recovered.push((registration.commitment, reference));
+    }
+    if !recovered.is_empty() {
+        update_stored(db_path, |current| {
+            if current.config != stored.config {
+                return Err("Names configuration changed during COMMIT recovery".into());
+            }
+            for (commitment, reference) in &recovered {
+                if let Some(registration) = current.registrations.iter_mut().find(|registration| {
+                    registration.commitment == *commitment
+                        && registration.commit_txid == Some(reference.txid)
+                }) {
+                    registration.commit_height = Some(reference.height);
+                    registration.commit_tx_index = Some(reference.tx_index);
+                    if registration.reveal_txid.is_none() {
+                        registration.phase = "commit_accepted".into();
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+    if let Some(checkpoint) = store
+        .core_snapshot()
+        .map_err(|error| format!("read Names transactional checkpoint: {error:?}"))?
+    {
+        let mut host =
+            NamesWalletHost::load_checkpoint(network, stored.config.clone(), &checkpoint)?;
+        if host.reducer_tip()? != store_tip {
+            return Err("Names transactional checkpoint does not match indexed reducer tip".into());
+        }
+        host.watch_registrations(&stored.registrations);
+        return Ok(Some(host));
+    }
     host_from_stored(network, &stored)
 }
 
 pub(crate) fn persist_for_sync(db_path: &str, host: &NamesWalletHost) -> Result<(), String> {
     persist_after_scan(db_path, host, &[])
+}
+
+pub(crate) fn persist_transactional_state(
+    transaction: &zcash_client_sqlite::ExtensionTransaction<'_>,
+    host: &NamesWalletHost,
+    deltas: &[ManagedBlockDelta],
+    reset_for_replay: bool,
+) -> Result<(), String> {
+    let identity = transactional_store_identity(host.network, &host.config)?;
+    let transaction = WalletNamesTransaction::new(transaction, identity)
+        .map_err(|error| format!("open Names wallet transaction: {error:?}"))?;
+    if reset_for_replay {
+        transaction
+            .reset_for_replay()
+            .map_err(|error| format!("reset Names state for replay: {error:?}"))?;
+    }
+    for delta in deltas {
+        transaction
+            .apply_delta(&delta.state_delta)
+            .map_err(|error| {
+                format!("persist Names delta at height {}: {error:?}", delta.height)
+            })?;
+        for (commitment, reference) in &delta.accepted_commits {
+            transaction
+                .record_wallet_commit(*commitment, *reference)
+                .map_err(|error| {
+                    format!(
+                        "persist wallet COMMIT observation at height {}: {error:?}",
+                        delta.height
+                    )
+                })?;
+        }
+    }
+    let checkpoint = host.save_checkpoint()?;
+    transaction
+        .put_core_snapshot(&checkpoint)
+        .map_err(|error| format!("persist Names Core checkpoint: {error:?}"))?;
+    let stored_tip = transaction
+        .tip()
+        .map_err(|error| format!("read persisted Names tip: {error:?}"))?;
+    if stored_tip != host.reducer_tip()? {
+        return Err("persisted Names reducer tip does not match prepared host".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn rollback_transactional_state(
+    transaction: &zcash_client_sqlite::ExtensionTransaction<'_>,
+    network: WalletNetwork,
+    db_path: &str,
+    height: u32,
+) -> Result<Option<coppice_names::reducer::ReducerTip>, String> {
+    let stored = read_stored(&sidecar_path(db_path))?
+        .ok_or_else(|| "Names is not configured".to_string())?;
+    let identity = transactional_store_identity(network, &stored.config)?;
+    WalletNamesTransaction::new(transaction, identity)
+        .map_err(|error| format!("open Names wallet transaction: {error:?}"))?
+        .rollback_to_height_or_reset(height)
+        .map_err(|error| format!("rollback Names state to {height}: {error:?}"))
 }
 
 pub(crate) fn persist_after_scan(
@@ -1736,7 +1951,8 @@ pub(crate) async fn ensure_for_managed_scan(
     client: &mut CompactTxStreamerClient<tonic::transport::Channel>,
     host: &mut Option<NamesWalletHost>,
     target_height: u32,
-) -> Result<(), String> {
+    store_tip: Option<coppice_names::reducer::ReducerTip>,
+) -> Result<(bool, Vec<ManagedBlockDelta>), String> {
     let stored = read_stored(&sidecar_path(db_path))?
         .ok_or_else(|| "Names is not configured".to_string())?;
     validate_deployed_config(network, &stored.config)?;
@@ -1759,29 +1975,27 @@ pub(crate) async fn ensure_for_managed_scan(
     if candidate_missing_required_name {
         candidate = None;
     }
-    if candidate
-        .as_ref()
-        .is_some_and(|candidate| candidate.tip_height() > target_height)
-    {
+    if candidate.as_ref().is_some_and(|candidate| {
+        candidate.tip_height() > target_height || candidate.reducer_tip().ok() != Some(store_tip)
+    }) {
         candidate = None;
     }
     if let Some(mut existing) = candidate {
         existing.watch_registrations(&stored.registrations);
         let forward = if existing.tip_height() < target_height {
             let start_height = existing.tip_height().saturating_add(1);
-            replay_range(&mut existing, client, start_height, target_height).await
+            replay_range_collect(&mut existing, client, start_height, target_height).await
         } else {
-            Ok(())
+            Ok(Vec::new())
         };
-        if forward.is_ok() {
+        if let Ok(deltas) = forward {
             let canonical_hash =
                 sync_engine::get_compact_block_hash(client, u64::from(target_height))
                     .await
                     .map_err(|error| error.to_string())?;
             if existing.core.tip().block_hash == canonical_hash.0 {
-                persist_for_sync(db_path, &existing)?;
                 *host = Some(existing);
-                return Ok(());
+                return Ok((false, deltas));
             }
         }
     }
@@ -1810,16 +2024,15 @@ pub(crate) async fn ensure_for_managed_scan(
         .collect::<BTreeSet<_>>();
     let mut rebuilt = NamesWalletHost::from_checkpoint(network, stored.config, checkpoint, names)?;
     rebuilt.watch_registrations(&stored.registrations);
-    replay_range(
+    let deltas = replay_range_collect(
         &mut rebuilt,
         client,
         base_height.saturating_add(1),
         target_height,
     )
     .await?;
-    persist_for_sync(db_path, &rebuilt)?;
     *host = Some(rebuilt);
-    Ok(())
+    Ok((true, deltas))
 }
 
 pub(crate) async fn bootstrap(
@@ -1983,10 +2196,22 @@ async fn replay_range(
     start: u32,
     end: u32,
 ) -> Result<(), String> {
+    replay_range_collect(host, client, start, end)
+        .await
+        .map(|_| ())
+}
+
+async fn replay_range_collect(
+    host: &mut NamesWalletHost,
+    client: &mut CompactTxStreamerClient<tonic::transport::Channel>,
+    start: u32,
+    end: u32,
+) -> Result<Vec<ManagedBlockDelta>, String> {
     if start > end {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let mut next = start;
+    let mut deltas = Vec::new();
     while next <= end {
         let batch_end = next
             .saturating_add(ACQUISITION_BATCH_BLOCKS.saturating_sub(1))
@@ -1999,12 +2224,12 @@ async fn replay_range(
         )
         .await
         .map_err(|error| format!("download Names blocks {next}..={batch_end}: {error}"))?;
-        host.apply_compact_blocks(client, blocks).await?;
+        deltas.extend(host.apply_compact_blocks(client, blocks).await?);
         next = batch_end
             .checked_add(1)
             .ok_or_else(|| "Names replay height overflow".to_string())?;
     }
-    Ok(())
+    Ok(deltas)
 }
 
 async fn activation_checkpoint(
@@ -2555,6 +2780,107 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(restored.managed_resolutions().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn restart_prefers_atomic_wallet_checkpoint_over_sidecar_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("wallet.db");
+        let db_path_string = db_path.to_str().unwrap();
+        configure(db_path_string, WalletNetwork::Regtest, 64).unwrap();
+        let activation = CoreReplayActivationCheckpoint {
+            height: 1,
+            block_hash: [7; 32],
+            ironwood_frontier: IronwoodFrontier::empty(),
+            ironwood_tree_size: 0,
+        };
+        let sidecar_host = NamesWalletHost::from_checkpoint(
+            WalletNetwork::Regtest,
+            config(),
+            activation.clone(),
+            ["alice".to_string()],
+        )
+        .unwrap();
+        persist_for_sync(db_path_string, &sidecar_host).unwrap();
+        initialize_transactional_store(db_path_string, WalletNetwork::Regtest).unwrap();
+
+        let atomic_host = NamesWalletHost::from_checkpoint(
+            WalletNetwork::Regtest,
+            config(),
+            activation,
+            ["alice".to_string(), "bob".to_string()],
+        )
+        .unwrap();
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let mut wallet = zcash_client_sqlite::WalletDb::from_connection(connection, (), (), ());
+        wallet
+            .transactionally_with_extension::<_, _, rusqlite::Error>(|_wallet_tx, extension| {
+                persist_transactional_state(extension, &atomic_host, &[], true)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)
+            })
+            .unwrap();
+        drop(wallet);
+
+        let restored = load_for_sync(db_path_string, WalletNetwork::Regtest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.managed_resolutions().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn restart_repairs_interrupted_sidecar_commit_observation() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("wallet.db");
+        let db_path_string = db_path.to_str().unwrap();
+        configure(db_path_string, WalletNetwork::Regtest, 64).unwrap();
+        store_registration(
+            db_path_string,
+            StoredRegistration {
+                account_uuid: "account".into(),
+                name: "alice".into(),
+                ua: "uregtest1invalid-for-storage-only".into(),
+                commitment: [6; 32],
+                target_epoch: 1,
+                target_reveal_height: 20,
+                send_flow_id: None,
+                bond_txid: None,
+                bond_output_index: None,
+                commit_height: None,
+                commit_tx_index: None,
+                phase: "commit_broadcast".into(),
+                commit_txid: Some([8; 32]),
+                reveal_txid: None,
+            },
+        )
+        .unwrap();
+        initialize_transactional_store(db_path_string, WalletNetwork::Regtest).unwrap();
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let mut wallet = zcash_client_sqlite::WalletDb::from_connection(connection, (), (), ());
+        wallet
+            .transactionally_with_extension::<_, _, rusqlite::Error>(|_wallet_tx, extension| {
+                WalletNamesTransaction::new(
+                    extension,
+                    transactional_store_identity(WalletNetwork::Regtest, &config()).unwrap(),
+                )
+                .unwrap()
+                .record_wallet_commit(
+                    [6; 32],
+                    coppice_names::protocol::CommitRef {
+                        height: 10,
+                        tx_index: 1,
+                        txid: [8; 32],
+                    },
+                )
+                .map_err(|_| rusqlite::Error::InvalidQuery)
+            })
+            .unwrap();
+        drop(wallet);
+
+        load_for_sync(db_path_string, WalletNetwork::Regtest).unwrap();
+        let registration = registrations(db_path_string).unwrap().remove(0);
+        assert_eq!(registration.commit_height, Some(10));
+        assert_eq!(registration.commit_tx_index, Some(1));
+        assert_eq!(registration.phase, "commit_accepted");
     }
 
     #[test]

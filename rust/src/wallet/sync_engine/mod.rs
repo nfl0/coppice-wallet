@@ -65,6 +65,29 @@ impl From<rusqlite::Error> for AtomicScanError {
     }
 }
 
+fn truncate_wallet_and_names(
+    db: &mut WalletDatabase,
+    db_path: &str,
+    network: WalletNetwork,
+    target: BlockHeight,
+    names_required: bool,
+) -> Result<BlockHeight, SqliteClientError> {
+    if !names_required {
+        return db.truncate_to_height(target);
+    }
+    db.transactionally_with_extension(|tx_db, extension| {
+        let actual = tx_db.truncate_to_height(target)?;
+        crate::wallet::coppice::rollback_transactional_state(
+            extension,
+            network,
+            db_path,
+            u32::from(actual),
+        )
+        .map_err(SqliteClientError::CorruptedData)?;
+        Ok(actual)
+    })
+}
+
 fn marked_names_block_fragment(
     start_position: u32,
     leaves: &[crate::wallet::coppice::ManagedLeaf],
@@ -1212,7 +1235,9 @@ fn queue_witness_repairs_if_needed(
 async fn repair_anchor_root_mismatch_if_needed(
     client: &mut CompactTxStreamerClient<Channel>,
     db: &mut WalletDatabase,
+    db_path: &str,
     network: WalletNetwork,
+    names_required: bool,
     current_tip_height: u64,
     repair_passes_this_run: &mut u32,
 ) -> Result<Option<u64>, SyncError> {
@@ -1313,7 +1338,24 @@ async fn repair_anchor_root_mismatch_if_needed(
         let attempt_result = with_wallet_db_write_lock(
             "sync_engine.truncate_to_chain_state.anchor_root_mismatch",
             || -> Result<Result<Vec<ScanRange>, String>, SyncError> {
-                match db.truncate_to_chain_state(repair_chain_state.clone()) {
+                let repair = if names_required {
+                    db.transactionally_with_extension(|tx_db, extension| {
+                        tx_db.truncate_to_chain_state(repair_chain_state.clone())?;
+                        crate::wallet::coppice::rollback_transactional_state(
+                            extension,
+                            network,
+                            db_path,
+                            u32::from(repair_height),
+                        )
+                        .map_err(SqliteClientError::CorruptedData)?;
+                        tx_db.update_chain_tip(current_tip)?;
+                        Ok(())
+                    })
+                } else {
+                    db.truncate_to_chain_state(repair_chain_state.clone())
+                        .and_then(|()| db.update_chain_tip(current_tip))
+                };
+                match repair {
                     Ok(()) => {}
                     Err(e) if is_commitment_tree_root_conflict(&e) => {
                         return Ok(Err(format!("{e}")));
@@ -1329,11 +1371,6 @@ async fn repair_anchor_root_mismatch_if_needed(
                         )));
                     }
                 }
-                db.update_chain_tip(current_tip).map_err(|e| {
-                    SyncError::db(format!(
-                        "update_chain_tip({current_tip_height}) after anchor root repair: {e}"
-                    ))
-                })?;
                 db.suggest_scan_ranges()
                     .map_err(|e| {
                         SyncError::db(format!("suggest_scan_ranges after anchor root repair: {e}"))
@@ -2042,13 +2079,16 @@ fn should_refresh_tip_before_completion(
 
 fn truncate_wallet_to_height(
     db: &mut WalletDatabase,
+    db_path: &str,
+    network: WalletNetwork,
+    names_required: bool,
     requested_height: BlockHeight,
     fresh_tip_height: BlockHeight,
     operation: &'static str,
 ) -> Result<BlockHeight, SyncError> {
     with_wallet_db_write_lock(operation, || {
         truncate_wallet_with(requested_height, fresh_tip_height, |height| {
-            db.truncate_to_height(height)
+            truncate_wallet_and_names(db, db_path, network, height, names_required)
         })
     })
 }
@@ -2122,12 +2162,18 @@ fn confirmed_reorg_rewind_target(fresh_tip_height: BlockHeight) -> Result<BlockH
 
 fn rewind_for_confirmed_tip_reorg(
     db: &mut WalletDatabase,
+    db_path: &str,
+    network: WalletNetwork,
+    names_required: bool,
     fresh_tip_height: u64,
 ) -> Result<(BlockHeight, Vec<ScanRange>, u64), SyncError> {
     let fresh_height = block_height_from_u64(fresh_tip_height, "reorg lightwalletd chain tip")?;
     let requested_height = confirmed_reorg_rewind_target(fresh_height)?;
     let actual_height = truncate_wallet_to_height(
         db,
+        db_path,
+        network,
+        names_required,
         requested_height,
         fresh_height,
         "sync_engine.truncate_to_height.tip_reorg",
@@ -2469,9 +2515,6 @@ async fn run_sync_impl(
     // 1. Connect gRPC (plain TLS via tonic + webpki roots).
     let mut client = open_lwd_channel(lightwalletd_url).await?;
 
-    // Open DB once — reused for the entire sync
-    let mut db =
-        with_wallet_db_write_lock("sync_engine.open_db", || open_db(db_data_path, network))?;
     // Coppice Names is normally an optional derived host. Once this wallet has
     // an owned-name workflow, however, the host becomes custody-sensitive:
     // scanning without it could prune a newly mined hidden bond witness.
@@ -2483,8 +2526,21 @@ async fn run_sync_impl(
         .then(|| crate::wallet::coppice::managed_activation_height(db_data_path, network))
         .transpose()
         .map_err(|error| SyncError::other(format!("read Coppice Names deployment: {error}")))?;
+    let mut names_store_tip = if names_scan_required {
+        with_wallet_db_write_lock("sync_engine.initialize_names_store", || {
+            crate::wallet::coppice::initialize_transactional_store(db_data_path, network)
+        })
+        .map_err(|error| SyncError::db(format!("initialize Coppice Names store: {error}")))?
+    } else {
+        None
+    };
     let mut names_host = match crate::wallet::coppice::load_for_sync(db_data_path, network) {
         Ok(host) => host,
+        Err(error) if names_scan_required => {
+            return Err(SyncError::db(format!(
+                "load custody-sensitive Coppice Names state: {error}"
+            )));
+        }
         Err(error) => {
             log::warn!(
                 "[{}] sync: ignoring invalid Coppice Names sidecar: {error}",
@@ -2493,6 +2549,11 @@ async fn run_sync_impl(
             None
         }
     };
+    // Open the long-lived wallet connection only after application-owned
+    // schema initialization and checkpoint loading have closed their short
+    // raw connections.
+    let mut db =
+        with_wallet_db_write_lock("sync_engine.open_db", || open_db(db_data_path, network))?;
     // The main-phase rewind budget also covers a reorg detected by the
     // initial tip response, before the scan queue has been created.
     let mut main_rewinds_this_run: u32 = 0;
@@ -2550,13 +2611,19 @@ async fn run_sync_impl(
                 ));
             }
             main_rewinds_this_run += 1;
-            let (actual_height, _, pending_blocks) =
-                rewind_for_confirmed_tip_reorg(&mut db, tip.height)?;
+            let (actual_height, _, pending_blocks) = rewind_for_confirmed_tip_reorg(
+                &mut db,
+                db_data_path,
+                network,
+                names_scan_required,
+                tip.height,
+            )?;
             crate::wallet::coppice::invalidate_after_reorg(
                 db_data_path,
                 &mut names_host,
                 u32::from(actual_height),
             );
+            names_store_tip = None;
             log::warn!(
                 "[{}] sync: initial tip proved a reorg; rewound to {} and \
                  queued {} block(s) toward tip {}",
@@ -2935,12 +3002,19 @@ async fn run_sync_impl(
                             main_rewinds_this_run += 1;
                             prefetch = None;
                             let (actual_height, repair_ranges, pending_blocks) =
-                                rewind_for_confirmed_tip_reorg(&mut db, fresh_tip.height)?;
+                                rewind_for_confirmed_tip_reorg(
+                                    &mut db,
+                                    db_data_path,
+                                    network,
+                                    names_scan_required,
+                                    fresh_tip.height,
+                                )?;
                             crate::wallet::coppice::invalidate_after_reorg(
                                 db_data_path,
                                 &mut names_host,
                                 u32::from(actual_height),
                             );
+                            names_store_tip = None;
                             log::warn!(
                                 "[{}] sync: periodic tip proved a reorg; rewound to {} \
                                  and queued {} block(s) toward tip {}",
@@ -3055,12 +3129,19 @@ async fn run_sync_impl(
                             main_rewinds_this_run += 1;
                             prefetch = None;
                             let (actual_height, repair_ranges, repair_pending_blocks) =
-                                rewind_for_confirmed_tip_reorg(&mut db, fresh_tip.height)?;
+                                rewind_for_confirmed_tip_reorg(
+                                    &mut db,
+                                    db_data_path,
+                                    network,
+                                    names_scan_required,
+                                    fresh_tip.height,
+                                )?;
                             crate::wallet::coppice::invalidate_after_reorg(
                                 db_data_path,
                                 &mut names_host,
                                 u32::from(actual_height),
                             );
+                            names_store_tip = None;
                             log::warn!(
                                 "[{}] sync: final tip proved a reorg; rewound to {} \
                                  and queued {} block(s) toward tip {}",
@@ -3099,12 +3180,20 @@ async fn run_sync_impl(
                 } else if let Some(repair_pending_blocks) = repair_anchor_root_mismatch_if_needed(
                     &mut client,
                     &mut db,
+                    db_data_path,
                     network,
+                    names_scan_required,
                     current_tip_height,
                     &mut anchor_root_repair_passes_this_run,
                 )
                 .await?
                 {
+                    crate::wallet::coppice::invalidate_after_reorg(
+                        db_data_path,
+                        &mut names_host,
+                        0,
+                    );
+                    names_store_tip = None;
                     force_witness_check_this_run = true;
                     initial_total = repair_pending_blocks;
                     prev_remaining = repair_pending_blocks;
@@ -3319,19 +3408,55 @@ async fn run_sync_impl(
             let target_height = first_height
                 .checked_sub(1)
                 .ok_or_else(|| SyncError::other("wallet scan batch has no predecessor height"))?;
-            crate::wallet::coppice::ensure_for_managed_scan(
-                db_data_path,
-                network,
-                &mut client,
-                &mut names_host,
-                target_height,
-            )
-            .await
-            .map_err(|error| {
-                SyncError::other(format!(
-                    "prepare custody-sensitive Coppice Names scan: {error}"
-                ))
+            let (reset_for_replay, replay_deltas) =
+                crate::wallet::coppice::ensure_for_managed_scan(
+                    db_data_path,
+                    network,
+                    &mut client,
+                    &mut names_host,
+                    target_height,
+                    names_store_tip,
+                )
+                .await
+                .map_err(|error| {
+                    SyncError::other(format!(
+                        "prepare custody-sensitive Coppice Names scan: {error}"
+                    ))
+                })?;
+            let host = names_host.as_ref().ok_or_else(|| {
+                SyncError::other("custody-sensitive Coppice Names host disappeared")
             })?;
+            if host.ironwood_tree_size() != wallet_pre_names_tree_size {
+                return Err(SyncError::other(format!(
+                    "rebuilt Coppice Names frontier ended at {}, wallet scan frontier starts at {wallet_pre_names_tree_size}",
+                    host.ironwood_tree_size(),
+                )));
+            }
+            if reset_for_replay || !replay_deltas.is_empty() {
+                db.transactionally_with_extension::<_, _, AtomicScanError>(|_tx_db, extension| {
+                    crate::wallet::coppice::persist_transactional_state(
+                        extension,
+                        host,
+                        &replay_deltas,
+                        reset_for_replay,
+                    )
+                    .map_err(|error| {
+                        AtomicScanError::Sqlite(SqliteClientError::CorruptedData(error))
+                    })
+                })
+                .map_err(|error| match error {
+                    AtomicScanError::Chain(error) => SyncError::other(format!(
+                        "unexpected chain error while seeding Names store: {error}"
+                    )),
+                    AtomicScanError::Sqlite(error) => {
+                        SyncError::db(format!("seed Coppice Names store: {error}"))
+                    }
+                })?;
+                names_store_tip = host.reducer_tip().map_err(SyncError::other)?;
+                crate::wallet::coppice::persist_for_sync(db_data_path, host).map_err(|error| {
+                    SyncError::other(format!("persist Coppice Names replay cache: {error}"))
+                })?;
+            }
         }
         let prepared_names = if first_names_height.is_none() {
             None
@@ -3399,7 +3524,7 @@ async fn run_sync_impl(
                     );
                 }
             }
-            db.transactionally(|tx_db| {
+            db.transactionally_with_extension(|tx_db, extension| {
                 let summary = scan_cached_blocks(
                     &network,
                     &block_source,
@@ -3470,6 +3595,19 @@ async fn run_sync_impl(
                                 candidate.ironwood_tree_size(),
                             ),
                         )));
+                    }
+                }
+                if names_scan_required {
+                    if let Some((candidate, deltas)) = &prepared_names {
+                        crate::wallet::coppice::persist_transactional_state(
+                            extension,
+                            candidate,
+                            deltas,
+                            false,
+                        )
+                        .map_err(|error| {
+                            AtomicScanError::Sqlite(SqliteClientError::CorruptedData(error))
+                        })?;
                     }
                 }
                 Ok(summary)
@@ -3568,7 +3706,13 @@ async fn run_sync_impl(
                     let actual_rewind_height = with_wallet_db_write_lock(
                         "sync_engine.truncate_to_height",
                         || -> Result<BlockHeight, SyncError> {
-                            match db.truncate_to_height(target) {
+                            match truncate_wallet_and_names(
+                                &mut db,
+                                db_data_path,
+                                network,
+                                target,
+                                names_scan_required,
+                            ) {
                                 Ok(h) => Ok(h),
                                 Err(SqliteClientError::RequestedRewindInvalid {
                                     safe_rewind_height: Some(safe),
@@ -3579,7 +3723,14 @@ async fn run_sync_impl(
                                          below earliest checkpoint; retrying at safe_rewind_height={safe}",
                                         elapsed(),
                                     );
-                                    db.truncate_to_height(safe).map_err(|e| {
+                                    truncate_wallet_and_names(
+                                        &mut db,
+                                        db_data_path,
+                                        network,
+                                        safe,
+                                        names_scan_required,
+                                    )
+                                    .map_err(|e| {
                                         if is_sqlite_lock_contention(&e) {
                                             SyncError::other(format!(
                                                 "truncate_to_height({safe}) retry: SQLite lock contention: {e}"
@@ -3626,6 +3777,7 @@ async fn run_sync_impl(
                         &mut names_host,
                         u32::from(actual_rewind_height),
                     );
+                    names_store_tip = None;
                     let current_tip = block_height_from_u64(
                         current_tip_height,
                         "current lightwalletd chain tip",
@@ -3692,14 +3844,16 @@ async fn run_sync_impl(
         if let Some((candidate, deltas)) = prepared_names {
             names_host = Some(candidate);
             if let Some(host) = names_host.as_ref() {
+                if names_scan_required {
+                    names_store_tip = host.reducer_tip().map_err(SyncError::other)?;
+                }
                 if let Err(error) =
                     crate::wallet::coppice::persist_after_scan(db_data_path, host, &deltas)
                 {
                     log::warn!(
-                        "[{}] sync: disabling Coppice Names host after checkpoint failure: {error}",
+                        "[{}] sync: canonical Coppice Names state committed, but derived sidecar cache update failed: {error}",
                         elapsed()
                     );
-                    names_host_failed = true;
                 }
             }
         }
@@ -3894,7 +4048,19 @@ async fn run_sync_impl(
                         main_rewinds_this_run += 1;
                         prefetch = None;
                         let (actual_height, repair_ranges, pending_blocks) =
-                            rewind_for_confirmed_tip_reorg(&mut db, fresh_tip.height)?;
+                            rewind_for_confirmed_tip_reorg(
+                                &mut db,
+                                db_data_path,
+                                network,
+                                names_scan_required,
+                                fresh_tip.height,
+                            )?;
+                        crate::wallet::coppice::invalidate_after_reorg(
+                            db_data_path,
+                            &mut names_host,
+                            u32::from(actual_height),
+                        );
+                        names_store_tip = None;
                         log::warn!(
                             "[{}] sync: post-batch tip proved a reorg; rewound to {} \
                                  and queued {} block(s) toward tip {}",
