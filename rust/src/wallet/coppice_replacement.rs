@@ -1609,14 +1609,8 @@ pub(crate) fn managed_registrations(
         .registrations
         .into_iter()
         .filter(|registration| registration.account_uuid == account_uuid)
-        .map(|mut registration| {
+        .map(|registration| {
             let resolution = resolutions.get(&registration.name).cloned();
-            if let Some(resolution) = &resolution {
-                if let Some(head) = &resolution.head {
-                    registration.phase = lifecycle_label(resolution.lifecycle).into();
-                    registration.ua = head.ua.as_str().to_owned();
-                }
-            }
             ManagedRegistration {
                 workflow: registration,
                 resolution,

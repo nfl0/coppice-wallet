@@ -8508,6 +8508,8 @@ impl SseDecode for crate::api::names::ApiManagedName {
         let mut var_name = <String>::sse_decode(deserializer);
         let mut var_paymentAddress = <Option<String>>::sse_decode(deserializer);
         let mut var_phase = <String>::sse_decode(deserializer);
+        let mut var_workflowPhase = <String>::sse_decode(deserializer);
+        let mut var_lifecycle = <Option<String>>::sse_decode(deserializer);
         let mut var_commitment = <Vec<u8>>::sse_decode(deserializer);
         let mut var_commitHeight = <Option<u64>>::sse_decode(deserializer);
         let mut var_commitExpiryHeight = <Option<u64>>::sse_decode(deserializer);
@@ -8528,6 +8530,8 @@ impl SseDecode for crate::api::names::ApiManagedName {
             name: var_name,
             payment_address: var_paymentAddress,
             phase: var_phase,
+            workflow_phase: var_workflowPhase,
+            lifecycle: var_lifecycle,
             commitment: var_commitment,
             commit_height: var_commitHeight,
             commit_expiry_height: var_commitExpiryHeight,
@@ -12191,6 +12195,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::names::ApiManagedName {
             self.name.into_into_dart().into_dart(),
             self.payment_address.into_into_dart().into_dart(),
             self.phase.into_into_dart().into_dart(),
+            self.workflow_phase.into_into_dart().into_dart(),
+            self.lifecycle.into_into_dart().into_dart(),
             self.commitment.into_into_dart().into_dart(),
             self.commit_height.into_into_dart().into_dart(),
             self.commit_expiry_height.into_into_dart().into_dart(),
@@ -15254,6 +15260,8 @@ impl SseEncode for crate::api::names::ApiManagedName {
         <String>::sse_encode(self.name, serializer);
         <Option<String>>::sse_encode(self.payment_address, serializer);
         <String>::sse_encode(self.phase, serializer);
+        <String>::sse_encode(self.workflow_phase, serializer);
+        <Option<String>>::sse_encode(self.lifecycle, serializer);
         <Vec<u8>>::sse_encode(self.commitment, serializer);
         <Option<u64>>::sse_encode(self.commit_height, serializer);
         <Option<u64>>::sse_encode(self.commit_expiry_height, serializer);

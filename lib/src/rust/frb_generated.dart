@@ -10040,28 +10040,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ApiManagedName dco_decode_api_managed_name(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 19)
-      throw Exception('unexpected arr length: expect 19 but see ${arr.length}');
+    if (arr.length != 21)
+      throw Exception('unexpected arr length: expect 21 but see ${arr.length}');
     return ApiManagedName(
       name: dco_decode_String(arr[0]),
       paymentAddress: dco_decode_opt_String(arr[1]),
       phase: dco_decode_String(arr[2]),
-      commitment: dco_decode_list_prim_u_8_strict(arr[3]),
-      commitHeight: dco_decode_opt_box_autoadd_u_64(arr[4]),
-      commitExpiryHeight: dco_decode_opt_box_autoadd_u_64(arr[5]),
-      commitBlocksRemaining: dco_decode_opt_box_autoadd_u_64(arr[6]),
-      commitWindowStart: dco_decode_u_64(arr[7]),
-      commitWindowEnd: dco_decode_u_64(arr[8]),
-      commitBlocksUntil: dco_decode_u_64(arr[9]),
-      commitWindowOpen: dco_decode_bool(arr[10]),
-      revealWindowStart: dco_decode_u_64(arr[11]),
-      revealWindowEnd: dco_decode_u_64(arr[12]),
-      revealBlocksUntil: dco_decode_u_64(arr[13]),
-      revealWindowOpen: dco_decode_bool(arr[14]),
-      refreshWindowStart: dco_decode_opt_box_autoadd_u_64(arr[15]),
-      refreshWindowEnd: dco_decode_opt_box_autoadd_u_64(arr[16]),
-      refreshBlocksUntil: dco_decode_opt_box_autoadd_u_64(arr[17]),
-      refreshWindowOpen: dco_decode_bool(arr[18]),
+      workflowPhase: dco_decode_String(arr[3]),
+      lifecycle: dco_decode_opt_String(arr[4]),
+      commitment: dco_decode_list_prim_u_8_strict(arr[5]),
+      commitHeight: dco_decode_opt_box_autoadd_u_64(arr[6]),
+      commitExpiryHeight: dco_decode_opt_box_autoadd_u_64(arr[7]),
+      commitBlocksRemaining: dco_decode_opt_box_autoadd_u_64(arr[8]),
+      commitWindowStart: dco_decode_u_64(arr[9]),
+      commitWindowEnd: dco_decode_u_64(arr[10]),
+      commitBlocksUntil: dco_decode_u_64(arr[11]),
+      commitWindowOpen: dco_decode_bool(arr[12]),
+      revealWindowStart: dco_decode_u_64(arr[13]),
+      revealWindowEnd: dco_decode_u_64(arr[14]),
+      revealBlocksUntil: dco_decode_u_64(arr[15]),
+      revealWindowOpen: dco_decode_bool(arr[16]),
+      refreshWindowStart: dco_decode_opt_box_autoadd_u_64(arr[17]),
+      refreshWindowEnd: dco_decode_opt_box_autoadd_u_64(arr[18]),
+      refreshBlocksUntil: dco_decode_opt_box_autoadd_u_64(arr[19]),
+      refreshWindowOpen: dco_decode_bool(arr[20]),
     );
   }
 
@@ -12804,6 +12806,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_name = sse_decode_String(deserializer);
     var var_paymentAddress = sse_decode_opt_String(deserializer);
     var var_phase = sse_decode_String(deserializer);
+    var var_workflowPhase = sse_decode_String(deserializer);
+    var var_lifecycle = sse_decode_opt_String(deserializer);
     var var_commitment = sse_decode_list_prim_u_8_strict(deserializer);
     var var_commitHeight = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_commitExpiryHeight = sse_decode_opt_box_autoadd_u_64(deserializer);
@@ -12826,6 +12830,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       name: var_name,
       paymentAddress: var_paymentAddress,
       phase: var_phase,
+      workflowPhase: var_workflowPhase,
+      lifecycle: var_lifecycle,
       commitment: var_commitment,
       commitHeight: var_commitHeight,
       commitExpiryHeight: var_commitExpiryHeight,
@@ -16410,6 +16416,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.name, serializer);
     sse_encode_opt_String(self.paymentAddress, serializer);
     sse_encode_String(self.phase, serializer);
+    sse_encode_String(self.workflowPhase, serializer);
+    sse_encode_opt_String(self.lifecycle, serializer);
     sse_encode_list_prim_u_8_strict(self.commitment, serializer);
     sse_encode_opt_box_autoadd_u_64(self.commitHeight, serializer);
     sse_encode_opt_box_autoadd_u_64(self.commitExpiryHeight, serializer);

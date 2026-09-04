@@ -1,6 +1,7 @@
 //! Flutter-facing replacement Coppice Names lifecycle and resolution API.
 
 use crate::wallet::{coppice, keys, network::WalletNetwork};
+use coppice_names::reducer::Lifecycle;
 use flutter_rust_bridge::frb;
 use zeroize::Zeroizing;
 
@@ -57,7 +58,15 @@ pub struct ApiNamesRegistrationDraft {
 pub struct ApiManagedName {
     pub name: String,
     pub payment_address: Option<String>,
+    /// Presentation phase after reconciling the durable wallet workflow with
+    /// the accepted public lifecycle. An unfinished replacement workflow has
+    /// priority over the old claimable head it is replacing.
     pub phase: String,
+    /// Durable wallet-local registration workflow phase. This must not be
+    /// overwritten by the lifecycle of an older accepted head.
+    pub workflow_phase: String,
+    /// Accepted public lifecycle for this exact name, when authenticated.
+    pub lifecycle: Option<String>,
     pub commitment: Vec<u8>,
     /// Present only after canonical replay has authenticated this exact
     /// COMMIT. These are workflow display values, not independent evidence.
@@ -163,6 +172,47 @@ pub fn get_names_bond_status(
     })
 }
 
+fn lifecycle_label(lifecycle: Lifecycle) -> &'static str {
+    match lifecycle {
+        Lifecycle::Active => "active",
+        Lifecycle::Cooldown => "cooldown",
+        Lifecycle::Claimable => "claimable",
+        Lifecycle::Missing => "missing",
+    }
+}
+
+fn is_unfinished_registration_phase(phase: &str) -> bool {
+    matches!(
+        phase,
+        "awaiting_bond"
+            | "bond_reserved"
+            | "commit_proposed"
+            | "commit_broadcast"
+            | "commit_accepted"
+            | "window_missed"
+            | "commit_expired"
+            | "reveal_broadcast"
+    )
+}
+
+fn managed_name_phase(
+    workflow_phase: &str,
+    lifecycle: Option<&str>,
+    has_accepted_head: bool,
+) -> String {
+    // A released/expired claimable head remains in the authenticated resolver
+    // while the wallet starts its replacement registration. During that new
+    // workflow, the actionable local phase must win; otherwise the UI sees
+    // only `claimable` and silently skips bond preparation.
+    if lifecycle == Some("claimable") && is_unfinished_registration_phase(workflow_phase) {
+        return workflow_phase.to_owned();
+    }
+    if has_accepted_head {
+        return lifecycle.unwrap_or(workflow_phase).to_owned();
+    }
+    workflow_phase.to_owned()
+}
+
 #[frb(sync)]
 pub fn get_managed_names(
     db_path: String,
@@ -181,6 +231,20 @@ pub fn get_managed_names(
         .into_iter()
         .map(|managed| {
             let registration = managed.workflow;
+            let workflow_phase = registration.phase.clone();
+            let lifecycle = managed
+                .resolution
+                .as_ref()
+                .map(|resolution| lifecycle_label(resolution.lifecycle).to_owned());
+            let accepted_head = managed
+                .resolution
+                .as_ref()
+                .and_then(|resolution| resolution.head.as_ref());
+            let phase = managed_name_phase(
+                &workflow_phase,
+                lifecycle.as_deref(),
+                accepted_head.is_some(),
+            );
             let name = coppice_names::protocol::Name::parse(&registration.name)
                 .map_err(|error| format!("invalid stored Names label: {error:?}"))?;
             let name_id = name
@@ -193,7 +257,8 @@ pub fn get_managed_names(
             let next_height = current_tip.saturating_add(1);
             let refresh_window = managed
                 .resolution
-                .and_then(|resolution| resolution.head)
+                .as_ref()
+                .and_then(|resolution| resolution.head.as_ref())
                 .map(|head| {
                     let predecessor_epoch = metadata
                         .parameters
@@ -220,7 +285,12 @@ pub fn get_managed_names(
                     Ok::<_, String>(window)
                 })
                 .transpose()?;
-            let payment_address = Some(registration.ua.clone());
+            let payment_address = Some(
+                accepted_head
+                    .map(|head| head.ua.as_str())
+                    .unwrap_or(&registration.ua)
+                    .to_owned(),
+            );
             let commit_expiry_height = registration
                 .commit_height
                 .map(|height| height.saturating_add(commit_ttl_blocks));
@@ -236,7 +306,9 @@ pub fn get_managed_names(
             Ok(ApiManagedName {
                 name: registration.name,
                 payment_address,
-                phase: registration.phase,
+                phase,
+                workflow_phase,
+                lifecycle,
                 commitment: registration.commitment.to_vec(),
                 commit_height: registration.commit_height.map(u64::from),
                 commit_expiry_height: commit_expiry_height.map(u64::from),
@@ -543,4 +615,33 @@ pub async fn resolve_name(
             .await?
             .into(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::managed_name_phase;
+
+    #[test]
+    fn claimable_predecessor_does_not_hide_replacement_workflow() {
+        assert_eq!(
+            managed_name_phase("awaiting_bond", Some("claimable"), true),
+            "awaiting_bond"
+        );
+        assert_eq!(
+            managed_name_phase("bond_reserved", Some("claimable"), true),
+            "bond_reserved"
+        );
+    }
+
+    #[test]
+    fn accepted_lifecycle_still_supersedes_completed_workflow() {
+        assert_eq!(
+            managed_name_phase("reveal_broadcast", Some("active"), true),
+            "active"
+        );
+        assert_eq!(
+            managed_name_phase("active", Some("cooldown"), true),
+            "cooldown"
+        );
+    }
 }

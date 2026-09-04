@@ -85,6 +85,18 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
     state = NamesRegistrationState(bondStatus: state.bondStatus);
   }
 
+  void reportError(String message) {
+    state = NamesRegistrationState(
+      bondStatus: state.bondStatus,
+      draftName: state.draftName,
+      draftPaymentAddress: state.draftPaymentAddress,
+      draftPhase: state.draftPhase,
+      commitBlocksUntil: state.commitBlocksUntil,
+      commitWindowOpen: state.commitWindowOpen,
+      error: message,
+    );
+  }
+
   void resumeDraft({
     required String name,
     required String paymentAddress,
@@ -242,7 +254,7 @@ class NamesRegistrationNotifier extends Notifier<NamesRegistrationState> {
         bondStatus: state.bondStatus,
         draftName: draftName,
         draftPaymentAddress: state.draftPaymentAddress,
-        draftPhase: draft.phase,
+        draftPhase: draft.workflowPhase,
         commitBlocksUntil: draft.commitBlocksUntil,
         commitWindowOpen: draft.commitWindowOpen,
       );

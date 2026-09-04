@@ -230,7 +230,12 @@ class _NamesViewState extends ConsumerState<NamesView> {
     }
     if (registration.draftPhase == 'awaiting_bond') {
       final ownAddress = ref.read(accountProvider).value?.activeAddress;
-      if (ownAddress == null || ownAddress.isEmpty) return;
+      if (ownAddress == null || ownAddress.isEmpty) {
+        notifier.reportError(
+          'The wallet could not load its receiving address. Try again after synchronization completes.',
+        );
+        return;
+      }
       context.go(
         '/send',
         extra: SendPrefillArgs(
@@ -322,7 +327,7 @@ class _NamesViewState extends ConsumerState<NamesView> {
         .resumeDraft(
           name: item.name,
           paymentAddress: address,
-          phase: item.phase,
+          phase: item.workflowPhase,
         );
     await _registerName();
   }

@@ -6,6 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+// These functions are ignored because they are not marked as `pub`: `is_unfinished_registration_phase`, `lifecycle_label`, `managed_name_phase`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`
 
 ApiNamesWalletStatus configureNames({
@@ -234,7 +235,18 @@ Future<ApiNamesResolution> resolveName({
 class ApiManagedName {
   final String name;
   final String? paymentAddress;
+
+  /// Presentation phase after reconciling the durable wallet workflow with
+  /// the accepted public lifecycle. An unfinished replacement workflow has
+  /// priority over the old claimable head it is replacing.
   final String phase;
+
+  /// Durable wallet-local registration workflow phase. This must not be
+  /// overwritten by the lifecycle of an older accepted head.
+  final String workflowPhase;
+
+  /// Accepted public lifecycle for this exact name, when authenticated.
+  final String? lifecycle;
   final Uint8List commitment;
 
   /// Present only after canonical replay has authenticated this exact
@@ -266,6 +278,8 @@ class ApiManagedName {
     required this.name,
     this.paymentAddress,
     required this.phase,
+    required this.workflowPhase,
+    this.lifecycle,
     required this.commitment,
     this.commitHeight,
     this.commitExpiryHeight,
@@ -289,6 +303,8 @@ class ApiManagedName {
       name.hashCode ^
       paymentAddress.hashCode ^
       phase.hashCode ^
+      workflowPhase.hashCode ^
+      lifecycle.hashCode ^
       commitment.hashCode ^
       commitHeight.hashCode ^
       commitExpiryHeight.hashCode ^
@@ -314,6 +330,8 @@ class ApiManagedName {
           name == other.name &&
           paymentAddress == other.paymentAddress &&
           phase == other.phase &&
+          workflowPhase == other.workflowPhase &&
+          lifecycle == other.lifecycle &&
           commitment == other.commitment &&
           commitHeight == other.commitHeight &&
           commitExpiryHeight == other.commitExpiryHeight &&
